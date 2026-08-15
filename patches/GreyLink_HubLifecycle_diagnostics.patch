@@ -1,0 +1,104 @@
+diff --git a/client/Client.cpp b/client/Client.cpp
+index ccf1348..0000000 100644
+--- a/client/Client.cpp
++++ b/client/Client.cpp
+@@ -39,6 +39,35 @@
+ static const unsigned USER_CHECK_INTERVAL = 60000;
+ static const unsigned USER_CHECK_VALIDITY = 60 * 60000;
+ 
++static string sanitizeHubLifecycleField(string value)
++{
++	std::replace(value.begin(), value.end(), '\r', ' ');
++	std::replace(value.begin(), value.end(), '\n', ' ');
++	std::replace(value.begin(), value.end(), '\t', ' ');
++	if (value.size() > 500)
++		value.resize(500);
++	return value;
++}
++
++static void logHubLifecycle(const char* eventName, const string& hubUrl, const string& address,
++	uint16_t port, bool secure, Socket::Protocol proto, const string& detail = Util::emptyString) noexcept
++{
++	try
++	{
++		string message = "[HubLifecycle] tick=" + Util::toString(GET_TICK());
++		message += " event=" + string(eventName);
++		message += " hub=" + sanitizeHubLifecycleField(hubUrl);
++		message += " address=" + sanitizeHubLifecycleField(address);
++		message += " port=" + Util::toString(port);
++		message += " secure=" + string(secure ? "1" : "0");
++		message += " proto=" + Util::toString(static_cast<int>(proto));
++		if (!detail.empty())
++			message += " detail=" + sanitizeHubLifecycleField(detail);
++
++		// Direct SYSTEM logging is intentional: diagnostics must be available even
++		// when the normal "log system messages" option is disabled by the user.
++		LogManager::log(LogManager::SYSTEM, message);
++	}
++	catch (...) {}
++}
++
+ std::atomic<uint32_t> Client::g_counts[COUNT_UNCOUNTED];
+ 
+ #ifdef _DEBUG
+@@ -337,6 +366,8 @@ void Client::connect()
+ 	resetRegistered();
+ 	resetOp();
+ 	updateConnectionStatus(ConnectionStatus::CONNECTING);
++	logHubLifecycle("CONNECT_START", hubURL, address, port, secure, proto,
++		"allowUntrusted=pending");
+ 
+ 	auto ss = SettingsManager::instance.getCoreSettings();
+ 	ss->lockRead();
+@@ -359,6 +390,7 @@ void Client::connect()
+ 	catch (const Exception& e)
+ 	{
+ 		state = STATE_DISCONNECTED;
++		logHubLifecycle("CONNECT_EXCEPTION", hubURL, address, port, secure, proto, e.getError());
+ 		csState.unlock();
+ 		fire(ClientListener::ClientFailed(), this, e.getError());
+ 		updateConnectionStatus(ConnectionStatus::FAILURE);
+@@ -408,6 +440,7 @@ void Client::onConnected() noexcept
+ 	updateActivityL();
+ 	ip = clientSock->getIp();
+ 	int af = ip.type;
++	logHubLifecycle("TCP_CONNECTED", hubURL, address, port, secure, proto, getIpPort());
+ 	if (clientSock->isSecure() && keyprint.compare(0, 7, "SHA256/", 7) == 0)
+ 	{
+ 		const auto kp = clientSock->getKeyprint();
+@@ -420,6 +453,7 @@ void Client::onConnected() noexcept
+ 				{
+ 					state = STATE_DISCONNECTED;
+ 					csState.unlock();
++					logHubLifecycle("KEYPRINT_MISMATCH", hubURL, address, port, secure, proto, STRING(KEYPRINT_MISMATCH));
+ 					fire(ClientListener::ClientFailed(), this, STRING(KEYPRINT_MISMATCH));
+ 					return;
+ 				}
+@@ -439,6 +473,7 @@ void Client::onConnected() noexcept
+ 	state = STATE_PROTOCOL;
+ 	csState.unlock();
+ 
++	logHubLifecycle("PROTOCOL_START", hubURL, address, port, secure, proto);
+ 	fire(ClientListener::Connected(), this);
+ }
+ 
+@@ -447,15 +482,19 @@ void Client::onFailed(const string& line) noexcept
+ 	bool connected = connSuccess;
+ 	state = STATE_DISCONNECTED;
+ 	updateActivityL();
+ 	csState.unlock();
+ 
++	logHubLifecycle(connected ? "FAILED_AFTER_SUCCESS" : "FAILED_BEFORE_SUCCESS",
++		hubURL, address, port, secure, proto, line);
+ 	if (!connected) updateConnectionStatus(ConnectionStatus::FAILURE);
+ 	clearUserCheckList();
+ 	fire(ClientListener::ClientFailed(), this, line);
+ }
+ 
+ void Client::disconnect(bool graceless)
+ {
++	logHubLifecycle("LOCAL_DISCONNECT", hubURL, address, port, secure, proto,
++		graceless ? "graceless=1" : "graceless=0");
+ 	csState.lock();
+ 	state = STATE_DISCONNECTED;
+ 	if (clientSock)
