@@ -1,0 +1,37 @@
+name: Stage 4 snapshot exact JsonFormatter
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ stage4-ed2k-from-stage3 ]
+    paths:
+      - '.github/workflows/stage4-snapshot-jsonformatter.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  snapshot:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: stage4-ed2k-from-stage3
+          fetch-depth: 0
+      - name: Reconstruct exact Stage 3
+        shell: pwsh
+        run: ./stage4/reconstruct_stage3.ps1
+      - name: Save exact JsonFormatter
+        shell: pwsh
+        run: |
+          Copy-Item 'blacklink/client/JsonFormatter.h' 'stage4/audit/JsonFormatter.h' -Force
+          if (-not (Test-Path 'stage4/audit/JsonFormatter.h')) { throw 'JsonFormatter snapshot missing' }
+      - name: Commit snapshot
+        shell: pwsh
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add stage4/audit/JsonFormatter.h
+          if (git diff --cached --quiet) { Write-Host 'JsonFormatter snapshot already current'; exit 0 }
+          git commit -m 'stage4: snapshot exact Stage 3 JsonFormatter'
+          git push origin HEAD:stage4-ed2k-from-stage3
