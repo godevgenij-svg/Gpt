@@ -41,7 +41,9 @@ When enabled, the aMule core launches `amuleapi --config-dir=<same config dir> -
 
 The core generates an ephemeral EC token in the common config directory, writes it with restrictive permissions, starts `amuleapi`, and removes any unread token after a short TTL. `amuleapi` consumes/deletes the token immediately and keeps it only in memory. This is preferable to storing a separate clear-text EC password in `amuleapi.conf`.
 
-Therefore Stage 4 should not invent an EC client and should not require a persistent EC password just for BlackLink integration.
+This token authenticates only the internal **aMule/amuled ↔ amuleapi EC connection**. It does not authenticate BlackLink to the HTTP API. Stage 4 still needs an amuleapi REST admin credential for search/download mutations, but it does not need to create or store a separate EC password.
+
+Therefore Stage 4 should not invent an EC client and should use the native aMule sidecar/token lifecycle for the backend connection.
 
 ## amuleapi HTTP/auth contract
 
@@ -62,7 +64,7 @@ Provision the REST admin password using the official one-shot CLI:
 
 `amuleapi --config-dir=<dir> --set-admin-pass=<plain>`
 
-Do not write or reverse-engineer `amuleapi-passwords` ourselves.
+Do not write or reverse-engineer `amuleapi-passwords` ourselves. For a one-click package, generate/provision this REST credential once and make the same credential available to the BlackLink provider. The secret must be redacted from diagnostic reports.
 
 ## Search contract
 
@@ -151,7 +153,7 @@ Do not transplant it wholesale.
 Known donor problems versus current API:
 
 1. It retries/re-authenticates `401` only for search start and download, not for `REQ_AMULE_RESULTS` polling. Current API explicitly requires polling to stop on first `401` and re-authenticate.
-2. It treats a persistent REST password in `ExternalSearch.xml` as mandatory and does not use the current native aMule sidecar/token lifecycle.
+2. Its `Password` field is the REST admin password (not an EC password), which is legitimate, but it leaves provisioning/secret handling entirely manual and does not package the current native aMule-managed `amuleapi` sidecar lifecycle.
 3. It parses only parent search rows and ignores `children[].ecid`, losing alternate-filename selection.
 4. It predates current multi-search/list behavior and should not be treated as authoritative for lifecycle details.
 
