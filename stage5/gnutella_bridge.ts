@@ -37,6 +37,13 @@ type BridgeResult = {
   serventIdHex: string;
 };
 
+const DEFAULT_BOOTSTRAP_CACHES = [
+  "https://www.paper.gwc.dyslexicfish.net/",
+  "http://www.rock.gwc.dyslexicfish.net/",
+  "http://www.scissors.gwc.dyslexicfish.net/",
+  "http://skulls.gwc.dyslexicfish.net/skulls.php",
+];
+
 function argValue(name: string, fallback: string): string {
   const prefix = `--${name}=`;
   const arg = process.argv.find((value) => value.startsWith(prefix));
@@ -51,12 +58,18 @@ function positivePort(value: string, fallback: number): number {
 const configPath = path.resolve(
   argValue("config", process.env.GNUTELLA_CONFIG || "gnutella-bridge.json"),
 );
-const apiHost = argValue("api-host", process.env.GNUTELLA_API_HOST || "127.0.0.1");
+const apiHost = argValue(
+  "api-host",
+  process.env.GNUTELLA_API_HOST || "127.0.0.1",
+);
 const apiPort = positivePort(
   argValue("api-port", process.env.GNUTELLA_API_PORT || "47831"),
   47831,
 );
-const apiToken = argValue("api-token", process.env.GNUTELLA_API_TOKEN || "");
+const apiToken = argValue(
+  "api-token",
+  process.env.GNUTELLA_API_TOKEN || "",
+);
 
 if (apiHost !== "127.0.0.1" && apiHost !== "::1" && apiHost !== "localhost") {
   throw new Error("Stage 5 bridge API must bind to loopback");
@@ -111,6 +124,9 @@ function onEvent(event: GnutellaEvent): void {
 }
 
 const doc = await loadDoc(configPath);
+if (!doc.config.gwebCacheUrls?.length) {
+  doc.config.gwebCacheUrls = [...DEFAULT_BOOTSTRAP_CACHES];
+}
 const node = new GnutellaServent(configPath, doc, { onEvent });
 await node.start();
 
@@ -151,7 +167,9 @@ function sessionView(session: SearchSession) {
   };
 }
 
-function matchSearchPath(pathname: string): { id: string; results: boolean } | undefined {
+function matchSearchPath(
+  pathname: string,
+): { id: string; results: boolean } | undefined {
   const match = /^\/v1\/search\/([^/]+)(\/results)?$/.exec(pathname);
   if (!match) return undefined;
   return { id: decodeURIComponent(match[1]), results: !!match[2] };
@@ -215,9 +233,10 @@ async function handle(request: Request): Promise<Response> {
     if (!Number.isInteger(resultNo) || resultNo <= 0) {
       return json({ error: "positive resultNo is required" }, 400);
     }
-    const destPath = typeof body.destPath === "string" && body.destPath.trim()
-      ? body.destPath.trim()
-      : undefined;
+    const destPath =
+      typeof body.destPath === "string" && body.destPath.trim()
+        ? body.destPath.trim()
+        : undefined;
     const job = await node.downloadResult(resultNo, destPath);
     return json({ job }, 202);
   }
