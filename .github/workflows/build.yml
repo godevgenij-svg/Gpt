@@ -73,8 +73,8 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      - name: Install ATL for v142
-        timeout-minutes: 15
+      - name: Ensure BlackLink VS2019 build prerequisites
+        timeout-minutes: 20
         shell: pwsh
         run: |
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -83,22 +83,65 @@ jobs:
           if (-not (Test-Path $setup)) { throw "Visual Studio setup.exe not found" }
           $vsPath = (& $vswhere -latest -products * -property installationPath).Trim()
           if (-not $vsPath) { throw "Visual Studio installation not found" }
-          $component = "Microsoft.VisualStudio.Component.VC.14.29.16.11.ATL"
+
+          function Find-V142Cl {
+            Get-ChildItem -Path "$vsPath\VC\Tools\MSVC" -Filter cl.exe -Recurse -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match '\\14\.29[^\\]*\\bin\\Hostx64\\x64\\cl\.exe$' } |
+              Select-Object -First 1
+          }
           function Find-V142Atl {
             Get-ChildItem -Path "$vsPath\VC\Tools\MSVC" -Filter atlbase.h -Recurse -ErrorAction SilentlyContinue |
               Where-Object { $_.FullName -match '\\14\.29[^\\]*\\atlmfc\\include\\atlbase\.h$' } |
               Select-Object -First 1
           }
+          function Find-Win10SdkFile([string]$name, [string]$subtree) {
+            $root = "${env:ProgramFiles(x86)}\Windows Kits\10\$subtree"
+            if (-not (Test-Path $root)) { return $null }
+            Get-ChildItem -Path $root -Filter $name -Recurse -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match '\\10\.0\.19041\.0\\' } |
+              Select-Object -First 1
+          }
+
+          $cl = Find-V142Cl
           $atl = Find-V142Atl
-          if (-not $atl) {
-            Write-Host "Installing $component into $vsPath"
-            $args = "modify --installPath `"$vsPath`" --add $component --quiet --norestart"
+          $windowsH = Find-Win10SdkFile 'Windows.h' 'Include'
+          $rc = Find-Win10SdkFile 'rc.exe' 'bin'
+          $mt = Find-Win10SdkFile 'mt.exe' 'bin'
+
+          if (-not $cl -or -not $atl -or -not $windowsH -or -not $rc -or -not $mt) {
+            Write-Host "Installing complete BlackLink prerequisite set into $vsPath"
+            $args = @(
+              'modify',
+              '--installPath', "`"$vsPath`"",
+              '--add', 'Microsoft.VisualStudio.ComponentGroup.VC.Tools.142.x86.x64',
+              '--add', 'Microsoft.VisualStudio.Component.VC.14.29.16.11.ATL',
+              '--add', 'Microsoft.VisualStudio.Component.Windows10SDK.19041',
+              '--quiet', '--norestart'
+            )
             $p = Start-Process -FilePath $setup -ArgumentList $args -Wait -PassThru
             if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "Visual Studio Installer failed with exit code $($p.ExitCode)" }
-            $atl = Find-V142Atl
           }
-          if (-not $atl) { throw "v142 ATL installation completed but atlbase.h is still missing" }
-          Write-Host "ATL: $($atl.FullName)"
+
+          $cl = Find-V142Cl
+          $atl = Find-V142Atl
+          $windowsH = Find-Win10SdkFile 'Windows.h' 'Include'
+          $rc = Find-Win10SdkFile 'rc.exe' 'bin'
+          $mt = Find-Win10SdkFile 'mt.exe' 'bin'
+          $msbuild = Get-Command msbuild -ErrorAction SilentlyContinue
+
+          if (-not $msbuild) { throw "MSBuild is missing after setup" }
+          if (-not $cl) { throw "MSVC v142 x64 compiler cl.exe is missing" }
+          if (-not $atl) { throw "v142 ATL atlbase.h is missing" }
+          if (-not $windowsH) { throw "Windows 10 SDK 19041 Windows.h is missing" }
+          if (-not $rc) { throw "Windows 10 SDK 19041 rc.exe is missing" }
+          if (-not $mt) { throw "Windows 10 SDK 19041 mt.exe is missing" }
+
+          Write-Host "MSBuild: $($msbuild.Source)"
+          Write-Host "v142 cl.exe: $($cl.FullName)"
+          Write-Host "v142 ATL: $($atl.FullName)"
+          Write-Host "Windows SDK Windows.h: $($windowsH.FullName)"
+          Write-Host "Windows SDK rc.exe: $($rc.FullName)"
+          Write-Host "Windows SDK mt.exe: $($mt.FullName)"
 
       - name: Build Release x64
         timeout-minutes: 30
