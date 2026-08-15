@@ -35,18 +35,21 @@ jobs:
           git -C blacklink checkout 1a72cfddca154da9070caca1b5a02df56d5498ab
           if ((git -C blacklink rev-parse HEAD).Trim() -ne '1a72cfddca154da9070caca1b5a02df56d5498ab') { throw 'Wrong upstream commit' }
 
-      - name: Apply Stage 2 chain
+      - name: Apply Stage 2 source chain
         shell: pwsh
         run: |
           $patchExe = 'C:\Program Files\Git\usr\bin\patch.exe'
           & $patchExe -p2 -d blacklink -i "$PWD\Stage2.patch" --batch --forward
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C blacklink apply --check ../patches/GreyLink_Stage2_MakeDefs_hotfix.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           git -C blacklink apply ../patches/GreyLink_Stage2_MakeDefs_hotfix.patch
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $patchExe -p2 -d blacklink -i "$PWD\patches\GreyLink_Stage2_compilefix1.patch" --batch --forward
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $patchExe -p1 -d blacklink -i "$PWD\patches\GreyLink_RU_runtimefix.patch" --batch --forward
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # The old RU runtime patch modifies Client.cpp only. It is intentionally omitted
+          # here because this workflow is solely an External Search source snapshot and
+          # Stage 5 must not alter/test the working DC runtime path.
           $path = 'blacklink\client\StringDefs.h'
           $text = Get-Content $path -Raw
           $text = $text -replace '(?m)^[ \t]*// Additional UI strings localized by the Russian localization patch\r?\n', ''
@@ -64,6 +67,8 @@ jobs:
           cmd /c "7z x Stage3.patch.xz -so > Stage3.patch"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if ((Get-FileHash "$PWD\Stage3.patch" -Algorithm SHA256).Hash.ToLowerInvariant() -ne '54eb0e38f49c355f48c4c0894dbd527bc5aa446295b8ea681aa233c52cabc58c') { throw 'Stage 3 patch hash mismatch' }
+          git -C blacklink apply --check ../Stage3.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           git -C blacklink apply ../Stage3.patch
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -76,12 +81,14 @@ jobs:
           cmd /c "7z x Stage4.patch.xz -so > Stage4.patch"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if ((Get-FileHash "$PWD\Stage4.patch" -Algorithm SHA256).Hash.ToLowerInvariant() -ne '1828691e8cd7407b915f1dcd5ae7d54a3243787eddce36610b65851098e4b063') { throw 'Stage 4 patch hash mismatch' }
+          git -C blacklink apply --check ../Stage4.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           git -C blacklink apply ../Stage4.patch
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           git -C blacklink diff --check
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Collect Stage 4 source snapshot
+      - name: Collect Stage 4 External Search source
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force snapshot\client,snapshot\windows,snapshot\compiled\Settings | Out-Null
@@ -92,9 +99,13 @@ jobs:
           Copy-Item blacklink\windows\SearchFrm.* snapshot\windows\ -ErrorAction SilentlyContinue
           Copy-Item blacklink\client\HttpClient.* snapshot\client\ -ErrorAction SilentlyContinue
           Copy-Item blacklink\compiled\Settings\ExternalSearch.xml snapshot\compiled\Settings\ -ErrorAction SilentlyContinue
-          Copy-Item blacklink\client\client.vcxproj snapshot\client\ -ErrorAction SilentlyContinue
-          Copy-Item blacklink\windows\windows.vcxproj snapshot\windows\ -ErrorAction SilentlyContinue
-          Get-ChildItem snapshot -Recurse | Select-Object FullName,Length | Format-Table
+          Copy-Item blacklink\client_2019.vcxproj snapshot\ -ErrorAction SilentlyContinue
+          Copy-Item blacklink\client_2019.vcxproj.filters snapshot\ -ErrorAction SilentlyContinue
+          Copy-Item blacklink\blacklink_2019.vcxproj snapshot\ -ErrorAction SilentlyContinue
+          Copy-Item blacklink\blacklink_2019.vcxproj.filters snapshot\ -ErrorAction SilentlyContinue
+          $files = @(Get-ChildItem snapshot -Recurse -File)
+          if ($files.Count -lt 6) { throw "Snapshot unexpectedly small: $($files.Count) files" }
+          $files | Select-Object FullName,Length | Format-Table
 
       - name: Upload Stage 4 source snapshot
         uses: actions/upload-artifact@v4
