@@ -1,0 +1,255 @@
+name: Stage 5 GnutellaBun bridge proof
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ stage5-gnutella ]
+    paths:
+      - '.github/workflows/stage5-gnutellabun-proof.yml'
+      - 'stage5/gnutella_bridge.ts'
+
+concurrency:
+  group: stage5-gnutellabun-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GNUTELLA_REPO: RickCarlino/gnutella-bun-client
+  GNUTELLA_COMMIT: 98adf6e9244a5499bff4718069f698f876d745e7
+  BUN_VERSION: 1.3.11
+
+jobs:
+  upstream-tests-and-live-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout Stage 5 control files
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned GnutellaBun source
+        uses: actions/checkout@v4
+        with:
+          repository: RickCarlino/gnutella-bun-client
+          ref: 98adf6e9244a5499bff4718069f698f876d745e7
+          path: gnutella
+
+      - name: Setup pinned Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.11
+
+      - name: Verify upstream source revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git -C gnutella rev-parse HEAD)"
+          test "$actual" = "$GNUTELLA_COMMIT"
+          echo "GNUTELLA_COMMIT=$actual"
+
+      - name: Install and verify upstream GnutellaBun
+        working-directory: gnutella
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          bun run typecheck
+          bun run test:unit
+          bun run test:integration
+
+      - name: Prepare isolated bridge package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p bridge-proof
+          cp stage5/gnutella_bridge.ts bridge-proof/gnutella_bridge.ts
+          cat > bridge-proof/package.json <<'JSON'
+          {
+            "private": true,
+            "dependencies": {
+              "gnutella": "file:../gnutella"
+            }
+          }
+          JSON
+          cd bridge-proof
+          bun install
+
+      - name: Typecheck and compile bridge for Linux
+        working-directory: bridge-proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun build --compile --outfile gnutella-bridge-linux-x64 gnutella_bridge.ts
+          test -x gnutella-bridge-linux-x64
+          sha256sum gnutella-bridge-linux-x64
+
+      - name: Live public Gnutella bootstrap and single search
+        working-directory: bridge-proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf live-data
+          mkdir -p live-data
+          ./gnutella-bridge-linux-x64 --config=live-data/gnutella.json --api-port=47831 > live-bridge.log 2>&1 &
+          pid=$!
+          cleanup() {
+            curl -fsS -X POST http://127.0.0.1:47831/v1/shutdown >/dev/null 2>&1 || true
+            kill "$pid" >/dev/null 2>&1 || true
+            wait "$pid" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          ready=0
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:47831/v1/health > health.json; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" = 1
+          cat health.json
+
+          connected=0
+          for i in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:47831/v1/health > health.json
+            peers="$(jq -r '.status.peers // 0' health.json)"
+            if [ "$peers" -gt 0 ]; then
+              connected=1
+              break
+            fi
+            sleep 2
+          done
+          echo "Public peer connectivity: $(cat health.json)"
+          if [ "$connected" != 1 ]; then
+            echo 'No public Gnutella peer connection after 120 seconds.' >&2
+            cat live-bridge.log >&2
+            exit 1
+          fi
+
+          curl -fsS -X POST \
+            -H 'Content-Type: application/json' \
+            --data '{"query":"linux"}' \
+            http://127.0.0.1:47831/v1/search > search.json
+          cat search.json
+          sid="$(jq -r '.id' search.json)"
+          test -n "$sid"
+          test "$sid" != null
+
+          for i in $(seq 1 30); do
+            curl -fsS "http://127.0.0.1:47831/v1/search/$sid/results" > results.json
+            count="$(jq -r '.resultCount // 0' results.json)"
+            if [ "$count" -gt 0 ]; then
+              break
+            fi
+            sleep 2
+          done
+          cat results.json
+          jq '{id, queryIdHex, resultCount, sample: (.results[0] // null)}' results.json > live-proof.json
+          cat live-proof.json
+
+          # Search cancellation is local collection cancellation; a sent Gnutella query cannot be retracted.
+          curl -fsS -X DELETE "http://127.0.0.1:47831/v1/search/$sid" > cancel.json
+          test "$(jq -r '.active' cancel.json)" = false
+
+          # Require an actual public result before the backend is considered proven useful.
+          test "$(jq -r '.resultCount // 0' results.json)" -gt 0
+
+      - name: Upload live proof logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Stage5-Gnutella-live-proof
+          path: |
+            bridge-proof/live-proof.json
+            bridge-proof/health.json
+            bridge-proof/search.json
+            bridge-proof/results.json
+            bridge-proof/cancel.json
+            bridge-proof/live-bridge.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  windows-single-exe:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Stage 5 control files
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned GnutellaBun source
+        uses: actions/checkout@v4
+        with:
+          repository: RickCarlino/gnutella-bun-client
+          ref: 98adf6e9244a5499bff4718069f698f876d745e7
+          path: gnutella
+
+      - name: Setup pinned Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.11
+
+      - name: Prepare isolated bridge package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path bridge-proof -Force | Out-Null
+          Copy-Item stage5\gnutella_bridge.ts bridge-proof\gnutella_bridge.ts -Force
+          @'
+          {
+            "private": true,
+            "dependencies": {
+              "gnutella": "file:../gnutella"
+            }
+          }
+          '@ | Set-Content bridge-proof\package.json -Encoding utf8
+          Push-Location bridge-proof
+          bun install
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Pop-Location
+
+      - name: Compile Windows x64 bridge
+        working-directory: bridge-proof
+        shell: pwsh
+        run: |
+          bun build --compile --target=bun-windows-x64 --outfile gnutella-bridge-x64.exe gnutella_bridge.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path .\gnutella-bridge-x64.exe)) { throw 'Windows bridge executable missing' }
+          Get-FileHash .\gnutella-bridge-x64.exe -Algorithm SHA256 | Format-List
+
+      - name: Windows startup and loopback API smoke
+        working-directory: bridge-proof
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path smoke-data -Force | Out-Null
+          $proc = Start-Process -FilePath .\gnutella-bridge-x64.exe -ArgumentList '--config=smoke-data/gnutella.json','--api-port=47831' -PassThru -RedirectStandardOutput bridge.stdout.log -RedirectStandardError bridge.stderr.log
+          try {
+            $health = $null
+            for ($i = 0; $i -lt 30; $i++) {
+              try {
+                $health = Invoke-RestMethod -Uri 'http://127.0.0.1:47831/v1/health' -TimeoutSec 2
+                break
+              } catch {
+                Start-Sleep -Seconds 1
+              }
+            }
+            if (-not $health -or -not $health.ok) {
+              Get-Content bridge.stdout.log -ErrorAction SilentlyContinue
+              Get-Content bridge.stderr.log -ErrorAction SilentlyContinue
+              throw 'Bridge loopback health check failed'
+            }
+            $health | ConvertTo-Json -Depth 8 | Set-Content windows-health.json -Encoding utf8
+            Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:47831/v1/shutdown' -TimeoutSec 2 | Out-Null
+            $proc.WaitForExit(10000) | Out-Null
+          } finally {
+            if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+          }
+
+      - name: Upload Windows bridge proof
+        uses: actions/upload-artifact@v4
+        with:
+          name: Stage5-GnutellaBridge-Windows-x64-proof
+          path: |
+            bridge-proof/gnutella-bridge-x64.exe
+            bridge-proof/windows-health.json
+            bridge-proof/bridge.stdout.log
+            bridge-proof/bridge.stderr.log
+          if-no-files-found: error
+          retention-days: 7
