@@ -73,6 +73,33 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
+      - name: Install ATL for v142
+        timeout-minutes: 15
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $setup = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+          if (-not (Test-Path $vswhere)) { throw "vswhere.exe not found" }
+          if (-not (Test-Path $setup)) { throw "Visual Studio setup.exe not found" }
+          $vsPath = (& $vswhere -latest -products * -property installationPath).Trim()
+          if (-not $vsPath) { throw "Visual Studio installation not found" }
+          $component = "Microsoft.VisualStudio.Component.VC.14.29.16.11.ATL"
+          function Find-V142Atl {
+            Get-ChildItem -Path "$vsPath\VC\Tools\MSVC" -Filter atlbase.h -Recurse -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match '\\14\.29[^\\]*\\atlmfc\\include\\atlbase\.h$' } |
+              Select-Object -First 1
+          }
+          $atl = Find-V142Atl
+          if (-not $atl) {
+            Write-Host "Installing $component into $vsPath"
+            $args = "modify --installPath `"$vsPath`" --add $component --quiet --norestart"
+            $p = Start-Process -FilePath $setup -ArgumentList $args -Wait -PassThru
+            if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "Visual Studio Installer failed with exit code $($p.ExitCode)" }
+            $atl = Find-V142Atl
+          }
+          if (-not $atl) { throw "v142 ATL installation completed but atlbase.h is still missing" }
+          Write-Host "ATL: $($atl.FullName)"
+
       - name: Build Release x64
         timeout-minutes: 30
         shell: pwsh
