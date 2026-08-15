@@ -1,0 +1,104 @@
+name: Stage 5 Gnutella backend proof
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ stage5-gnutella ]
+    paths:
+      - '.github/workflows/stage5-gnutella-proof.yml'
+      - 'stage5/**'
+
+concurrency:
+  group: stage5-gnutella-proof-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mldonkey-windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout Stage 5 control files
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned MLDonkey source
+        uses: actions/checkout@v4
+        with:
+          repository: ygrek/mldonkey
+          ref: 0d4463568fa6374fec964d139a769c5966bb7599
+          path: mldonkey
+
+      - name: Use OCaml 4.14.1
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: 4.14.1
+
+      - name: Install MinGW GD dependency used by upstream Windows CI
+        shell: pwsh
+        run: |
+          & 'D:\cygwin\setup-x86_64.exe' '--root' 'D:\cygwin' '--quiet-mode' 'unattended' '--no-shortcuts' '--no-startmenu' '--no-desktop' '--no-admin' '--no-version-check' '--no-write-registry' '--packages' 'mingw64-x86_64-gd'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Install MLDonkey build dependencies
+        working-directory: mldonkey
+        shell: pwsh
+        run: |
+          opam pin add mldonkey.dev . --no-action -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          opam install . --deps-only --with-doc --with-test -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Configure isolated Gnutella and Gnutella2 backend
+        working-directory: mldonkey
+        shell: pwsh
+        run: |
+          opam exec -- env SHELLOPTS=igncr sh ./configure --enable-gnutella --enable-gnutella2 --disable-donkey --disable-bittorrent --disable-fasttrack --disable-directconnect --disable-filetp --disable-gui --disable-upnp-natpmp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify generated network configuration
+        working-directory: mldonkey
+        shell: pwsh
+        run: |
+          $files = @('config\Makefile.config','Makefile.config','src\utils\lib\autoconf.ml') | Where-Object { Test-Path $_ }
+          if (-not $files) { throw 'No generated configuration file found' }
+          $text = ($files | ForEach-Object { Get-Content $_ -Raw }) -join "`n"
+          $g1 = $text -match '(?im)(GNUTELLA\s*=\s*yes|gnutella[^\r\n]*yes|gnutella[^\r\n]*true)'
+          $g2 = $text -match '(?im)(GNUTELLA2\s*=\s*yes|gnutella2[^\r\n]*yes|gnutella2[^\r\n]*true)'
+          Write-Host "Generated config files: $($files -join ', ')"
+          Write-Host "Gnutella enabled marker: $g1"
+          Write-Host "Gnutella2 enabled marker: $g2"
+          if (-not $g1 -or -not $g2) {
+            Write-Host $text
+            throw 'Configure did not prove both Gnutella networks enabled'
+          }
+
+      - name: Build mlnet
+        working-directory: mldonkey
+        shell: pwsh
+        run: |
+          opam exec -- make
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify Windows core artifact
+        working-directory: mldonkey
+        shell: pwsh
+        run: |
+          $candidates = Get-ChildItem -Recurse -File | Where-Object { $_.Name -in @('mlnet','mlnet.exe') }
+          if (-not $candidates) { throw 'mlnet build artifact not found' }
+          $candidates | Select-Object FullName,Length,LastWriteTimeUtc | Format-Table -AutoSize
+          $chosen = $candidates | Sort-Object Length -Descending | Select-Object -First 1
+          "MLDONKEY_COMMIT=0d4463568fa6374fec964d139a769c5966bb7599" | Set-Content stage5-proof.txt -Encoding ascii
+          "MLNET=$($chosen.FullName)" | Add-Content stage5-proof.txt -Encoding ascii
+          "SIZE=$($chosen.Length)" | Add-Content stage5-proof.txt -Encoding ascii
+          "SHA256=$((Get-FileHash $chosen.FullName -Algorithm SHA256).Hash.ToLowerInvariant())" | Add-Content stage5-proof.txt -Encoding ascii
+          Copy-Item $chosen.FullName '.\mlnet-stage5.exe' -Force
+
+      - name: Upload proof artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Stage5-MLDonkey-Gnutella-Windows-proof
+          path: |
+            mldonkey/mlnet-stage5.exe
+            mldonkey/stage5-proof.txt
+          if-no-files-found: error
+          retention-days: 7
