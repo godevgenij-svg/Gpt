@@ -1,0 +1,128 @@
+name: Stage 4 donor audit
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ stage4-ed2k-from-stage3 ]
+    paths:
+      - '.github/workflows/stage4-donor-audit.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  audit:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout clean Stage 4 branch
+        uses: actions/checkout@v4
+        with:
+          ref: stage4-ed2k-from-stage3
+          fetch-depth: 0
+
+      - name: Reconstruct Stage 2 base patch
+        shell: pwsh
+        run: |
+          $parts = Get-ChildItem "patches\ci2.part*" | Sort-Object Name
+          if ($parts.Count -ne 8) { throw "Expected 8 Stage 2 chunks, found $($parts.Count)" }
+          $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+          if ($b64.Length -ne 30604) { throw "Unexpected Stage 2 base64 length: $($b64.Length)" }
+          [IO.File]::WriteAllBytes("$PWD\Stage2.patch.xz", [Convert]::FromBase64String($b64))
+          if ((Get-FileHash "$PWD\Stage2.patch.xz" -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'ff95c6073cde34ff3af0e082c06e5131273f4544a9ee81686d7420d9aba7f05b') { throw 'Stage 2 XZ hash mismatch' }
+          cmd /c "7z x Stage2.patch.xz -so > Stage2.patch"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ((Get-FileHash "$PWD\Stage2.patch" -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'c120d913ac679d4b494d6ac7877b50c1e96beb431dac5bbc4912cf617ab31999') { throw 'Stage 2 patch hash mismatch' }
+
+      - name: Clone pinned BlackLink and reconstruct exact Stage 3
+        shell: pwsh
+        run: |
+          git clone https://github.com/zipper9/blacklink.git blacklink
+          git -C blacklink checkout 1a72cfddca154da9070caca1b5a02df56d5498ab
+          if ((git -C blacklink rev-parse HEAD).Trim() -ne '1a72cfddca154da9070caca1b5a02df56d5498ab') { throw 'Wrong upstream revision' }
+          $patchExe = "C:\Program Files\Git\usr\bin\patch.exe"
+          & $patchExe -p2 -d blacklink -i "$PWD\Stage2.patch" --batch --forward
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C blacklink apply --check ../patches/GreyLink_Stage2_MakeDefs_hotfix.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C blacklink apply ../patches/GreyLink_Stage2_MakeDefs_hotfix.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $patchExe -p2 -d blacklink -i "$PWD\patches\GreyLink_Stage2_compilefix1.patch" --batch --forward
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $patchExe -p1 -d blacklink -i "$PWD\patches\GreyLink_RU_runtimefix.patch" --batch --forward
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $sd = "blacklink\client\StringDefs.h"
+          $text = Get-Content $sd -Raw
+          $text = $text -replace '(?m)^[ \t]*// Additional UI strings localized by the Russian localization patch\r?\n', ''
+          $text = $text -replace '(?m)^[ \t]*// GreyBridge multi-network UI\r?\n', ''
+          [IO.File]::WriteAllText((Resolve-Path $sd), $text, [Text.UTF8Encoding]::new($false))
+          $parts = Get-ChildItem "patches\stage3.part*" | Sort-Object Name
+          $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+          if ($b64.Length -ne 24024) { throw 'Stage 3 base64 length mismatch' }
+          [IO.File]::WriteAllBytes("$PWD\Stage3.patch.xz", [Convert]::FromBase64String($b64))
+          if ((Get-FileHash "$PWD\Stage3.patch.xz" -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'ed453da31122b6cec97566b119ff119c25cf34f9d3cc4b7b7cfd94b40926f8ff') { throw 'Stage 3 XZ hash mismatch' }
+          cmd /c "7z x Stage3.patch.xz -so > Stage3.patch"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ((Get-FileHash "$PWD\Stage3.patch" -Algorithm SHA256).Hash.ToLowerInvariant() -ne '54eb0e38f49c355f48c4c0894dbd527bc5aa446295b8ea681aa233c52cabc58c') { throw 'Stage 3 patch hash mismatch' }
+          git -C blacklink apply --check ../Stage3.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C blacklink apply ../Stage3.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C blacklink diff --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C blacklink config user.name audit
+          git -C blacklink config user.email audit@example.invalid
+          git -C blacklink add -A
+          git -C blacklink commit -m stage3-audit-baseline | Out-Null
+
+      - name: Extract and verify legacy Stage 4 donor patch
+        shell: pwsh
+        run: |
+          git fetch origin stage4-amule-report --depth=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $b64 = git show FETCH_HEAD:patches/stage4.b64
+          $b64 = ($b64 -join "`n").Trim()
+          if ($b64.Length -ne 16592) { throw "Unexpected donor Stage 4 base64 length: $($b64.Length)" }
+          [IO.File]::WriteAllBytes("$PWD\Stage4-donor.patch.xz", [Convert]::FromBase64String($b64))
+          if ((Get-FileHash "$PWD\Stage4-donor.patch.xz" -Algorithm SHA256).Hash.ToLowerInvariant() -ne '436973d902c0b40df908de961eb829f86fca86b6e436febc013b4a32b3bc6815') { throw 'Donor Stage 4 XZ hash mismatch' }
+          cmd /c "7z x Stage4-donor.patch.xz -so > Stage4-donor.patch"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ((Get-FileHash "$PWD\Stage4-donor.patch" -Algorithm SHA256).Hash.ToLowerInvariant() -ne '1828691e8cd7407b915f1dcd5ae7d54a3243787eddce36610b65851098e4b063') { throw 'Donor Stage 4 patch hash mismatch' }
+          git -C blacklink apply --check ../Stage4-donor.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C blacklink apply ../Stage4-donor.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C blacklink diff --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Save donor-only changed sources
+        shell: pwsh
+        run: |
+          Remove-Item stage4/donor -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force stage4/donor/source | Out-Null
+          Copy-Item Stage4-donor.patch stage4/donor/Stage4-donor.patch -Force
+          $changed = @(git -C blacklink diff --name-only HEAD)
+          if ($changed.Count -eq 0) { throw 'Donor patch changed no files' }
+          $changed | Set-Content stage4/donor/CHANGED_FILES.txt -Encoding UTF8
+          foreach ($rel in $changed) {
+            $src = Join-Path blacklink $rel
+            if (-not (Test-Path $src -PathType Leaf)) { continue }
+            $dst = Join-Path 'stage4/donor/source' $rel
+            New-Item -ItemType Directory -Force (Split-Path $dst -Parent) | Out-Null
+            Copy-Item $src $dst -Force
+          }
+          @(
+            'Reference only; do not apply blindly.',
+            'Donor branch: stage4-amule-report',
+            'Donor patch SHA256: 1828691e8cd7407b915f1dcd5ae7d54a3243787eddce36610b65851098e4b063',
+            'Baseline: exact reconstructed Stage 3 commit 4405d3d496dffaf29a51bad887d48c4bae23a25f'
+          ) | Set-Content stage4/donor/README.txt -Encoding UTF8
+
+      - name: Commit donor audit
+        shell: pwsh
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add stage4/donor
+          if (git diff --cached --quiet) { Write-Host 'Donor audit already current'; exit 0 }
+          git commit -m 'stage4: snapshot legacy donor for selective rewrite'
+          git push origin HEAD:stage4-ed2k-from-stage3
