@@ -52,6 +52,13 @@ jobs:
           git -C blacklink apply ../patches/GreyLink_Stage2_MakeDefs_hotfix.patch
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Apply Stage 2 compile fixes
+        shell: pwsh
+        run: |
+          $patchExe = "C:\Program Files\Git\usr\bin\patch.exe"
+          & $patchExe -p2 -d blacklink -i "$PWD\patches\GreyLink_Stage2_compilefix1.patch" --batch --forward
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Sanitize and validate StringDefs for MakeDefs
         shell: pwsh
         run: |
