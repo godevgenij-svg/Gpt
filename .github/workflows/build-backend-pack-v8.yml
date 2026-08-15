@@ -4,8 +4,7 @@ on:
   push:
     branches: [ backend-pack-ready ]
     paths:
-      - 'backend_pack/BackendPackV6.ps1'
-      - 'backend_pack/BuildPackV7.ps1'
+      - 'backend_pack/BackendPackV8.ps1'
       - 'backend_pack/BuildPackV8.ps1'
       - '.github/workflows/build-backend-pack-v8.yml'
   workflow_dispatch:
@@ -19,15 +18,15 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Assemble and smoke test
+      - name: Assemble and full smoke test
         shell: pwsh
         run: ./backend_pack/BuildPackV8.ps1 -OutputDirectory ./backend_pack/out
       - name: Upload ready bundle
         uses: actions/upload-artifact@v4
         with:
-          name: BlackLink_Backends_Ready_x64
+          name: BlackLink_Backends_Ready_x64_v8
           path: |
-            backend_pack/out/BlackLink_Backends_Ready_x64.zip
-            backend_pack/out/BlackLink_Backends_Ready_x64.sha256.txt
+            backend_pack/out/BlackLink_Backends_Ready_x64_v8.zip
+            backend_pack/out/BlackLink_Backends_Ready_x64_v8.sha256.txt
           if-no-files-found: error
           retention-days: 30
