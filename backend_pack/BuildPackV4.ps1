@@ -6,7 +6,9 @@ $text = $text.Replace("'BackendPackV2.ps1','SETUP_AND_START.cmd'", "'BackendPack
 $text = $text.Replace(".Replace('BackendPack.ps1','BackendPackV2.ps1')", ".Replace('BackendPack.ps1','BackendPackV4.ps1')")
 $text = $text.Replace('$r=Join-Path $sm BackendPackV2.ps1', '$r=Join-Path $sm BackendPackV4.ps1')
 $text = $text.Replace("smoke\\BackendPackV2.ps1", "smoke\\BackendPackV4.ps1")
-$temp = Join-Path $env:TEMP ('BuildPackV4-expanded-' + [guid]::NewGuid().ToString('N') + '.ps1')
+# The generated script must stay next to the source helpers because BuildPackV3
+# intentionally resolves files relative to $PSScriptRoot.
+$temp = Join-Path $PSScriptRoot ('.BuildPackV4-expanded-' + [guid]::NewGuid().ToString('N') + '.ps1')
 try {
     Set-Content -LiteralPath $temp -Value $text -Encoding UTF8
     & $temp -OutputDirectory $OutputDirectory
