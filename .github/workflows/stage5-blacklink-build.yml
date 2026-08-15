@@ -107,6 +107,20 @@ jobs:
           try { $gzip.CopyTo($output) } finally { $output.Dispose(); $gzip.Dispose(); $input.Dispose() }
           $hash = (Get-FileHash "$PWD\Stage5.patch" -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($hash -ne 'f1beca5e45b574e182d77e526acb94831e96c8002a92bdbaa12f0778e9f062c4') { throw "Stage 5 patch hash mismatch: $hash" }
+
+          # Stage 3/4 are applied by git on Windows and leave these files CRLF, while the
+          # Stage 5 patch was generated from the exact source snapshot using LF. Normalize
+          # only the Stage 5 patch targets so patch application is deterministic.
+          foreach ($target in @(
+            'blacklink\client\ExternalSearchManager.h',
+            'blacklink\client\ExternalSearchManager.cpp',
+            'blacklink\compiled\Settings\ExternalSearch.xml'
+          )) {
+            $resolved = Resolve-Path $target
+            $text = [IO.File]::ReadAllText($resolved, [Text.Encoding]::UTF8).Replace("`r`n", "`n")
+            [IO.File]::WriteAllText($resolved, $text, [Text.UTF8Encoding]::new($false))
+          }
+
           $patchExe = "C:\Program Files\Git\usr\bin\patch.exe"
           & $patchExe -p1 -d blacklink -i "$PWD\Stage5.patch" --batch --forward
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
