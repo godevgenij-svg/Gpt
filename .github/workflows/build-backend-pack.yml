@@ -1,0 +1,169 @@
+name: Build portable backend pack
+
+on:
+  push:
+    branches: [ backend-pack-ready ]
+    paths:
+      - 'backend_pack/**'
+      - '.github/workflows/build-backend-pack.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download and assemble official backends
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tmp = Join-Path $env:RUNNER_TEMP 'backend-downloads'
+          $pack = Join-Path $env:RUNNER_TEMP 'BlackLink_Backends_Ready_x64'
+          New-Item -ItemType Directory -Path $tmp,$pack,(Join-Path $pack 'Backends') -Force | Out-Null
+
+          function Download-Verified([string]$Url, [string]$Out, [string]$Sha256) {
+            Write-Host "Downloading $Url"
+            & curl.exe -fL --retry 4 --retry-delay 2 $Url -o $Out
+            if ($LASTEXITCODE -ne 0) { throw "Download failed: $Url" }
+            $actual = (Get-FileHash -LiteralPath $Out -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $Sha256.ToLowerInvariant()) { throw "SHA256 mismatch for $Out : $actual" }
+          }
+
+          # slskd 0.26.0, official Windows x64 release asset.
+          $slZip = Join-Path $tmp 'slskd.zip'
+          Download-Verified 'https://github.com/slskd/slskd/releases/download/0.26.0/slskd-0.26.0-win-x64.zip' $slZip '942299d8c97da6cc1f6cd82dcd4a3662b97b82fbd1742df4bec165b79357268a'
+          $slOut = Join-Path $pack 'Backends\slskd'
+          Expand-Archive -LiteralPath $slZip -DestinationPath $slOut -Force
+          if (-not (Get-ChildItem $slOut -Recurse -File -Filter slskd.exe | Select-Object -First 1)) { throw 'slskd.exe missing after extraction' }
+
+          # Prowlarr 2.5.2.5491, official Windows x64 portable archive.
+          $prZip = Join-Path $tmp 'prowlarr.zip'
+          Download-Verified 'https://github.com/Prowlarr/Prowlarr/releases/download/v2.5.2.5491/Prowlarr.master.2.5.2.5491.windows-core-x64.zip' $prZip 'c5959a6cac7fa186e7360b70e0fe00f580aca20c1dec7e3f4f686a02f7d03039'
+          $prOut = Join-Path $pack 'Backends\Prowlarr'
+          Expand-Archive -LiteralPath $prZip -DestinationPath $prOut -Force
+          if (-not (Get-ChildItem $prOut -Recurse -File -Filter Prowlarr.exe | Select-Object -First 1)) { throw 'Prowlarr.exe missing after extraction' }
+
+          # qBittorrent 5.2.3. Official project publishes an NSIS installer; extract it into the portable bundle.
+          $qbSetup = Join-Path $tmp 'qbittorrent.exe'
+          Download-Verified 'https://github.com/qbittorrent/qBittorrent/releases/download/release-5.2.3/qbittorrent_5.2.3_x64_setup.exe' $qbSetup 'ff508e2f912d59c9eabaf03633ebacfd45c2049f38dcac027b8a7d7ad867ab2f'
+          $qbExtract = Join-Path $tmp 'qb-extract'
+          New-Item -ItemType Directory -Path $qbExtract -Force | Out-Null
+          & 7z.exe x $qbSetup "-o$qbExtract" -y | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw '7-Zip failed to extract qBittorrent installer' }
+          $qbExe = Get-ChildItem $qbExtract -Recurse -File -Filter qbittorrent.exe | Select-Object -First 1
+          if (-not $qbExe) { throw 'qbittorrent.exe missing after installer extraction' }
+          $qbOut = Join-Path $pack 'Backends\qBittorrent'
+          New-Item -ItemType Directory -Path $qbOut -Force | Out-Null
+          Copy-Item -Path (Join-Path $qbExe.Directory.FullName '*') -Destination $qbOut -Recurse -Force
+          if (-not (Test-Path (Join-Path $qbOut 'qbittorrent.exe'))) { throw 'qBittorrent portable copy failed' }
+
+          # aMule post-3.0.1 official CI artifact containing amuleapi.exe.
+          # Pinned run/commit: 31881861606 / 68eb98885dfcdaed407c9b0ace4dacd5fb8065ea.
+          $amArtifact = Join-Path $tmp 'amule-artifact.zip'
+          $amUrl = 'https://nightly.link/amule-org/amule/actions/runs/31881861606/aMule-3.0.1-557-g68eb98885-Windows-x64.zip'
+          & curl.exe -fL --retry 4 --retry-delay 2 $amUrl -o $amArtifact
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to download pinned official aMule Actions artifact through nightly.link' }
+          $amOuter = Join-Path $tmp 'amule-outer'
+          Expand-Archive -LiteralPath $amArtifact -DestinationPath $amOuter -Force
+          $inner = Get-ChildItem $amOuter -Recurse -File -Filter '*Windows-x64*.zip' | Select-Object -First 1
+          $amOut = Join-Path $pack 'Backends\aMule'
+          New-Item -ItemType Directory -Path $amOut -Force | Out-Null
+          if ($inner) {
+            $innerHash = (Get-FileHash -LiteralPath $inner.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($innerHash -ne 'a6d6bb99c325418891bbc3361693eb88aebfb48e08df636d7bc2de2ef1671d41') {
+              throw "Unexpected aMule inner package SHA256: $innerHash"
+            }
+            Expand-Archive -LiteralPath $inner.FullName -DestinationPath $amOut -Force
+          }
+          else {
+            Copy-Item -Path (Join-Path $amOuter '*') -Destination $amOut -Recurse -Force
+          }
+          foreach ($required in @('amule.exe','amuled.exe','amuleapi.exe')) {
+            if (-not (Get-ChildItem $amOut -Recurse -File -Filter $required | Select-Object -First 1)) { throw "$required missing from aMule artifact" }
+          }
+
+          # Add configuration/launch layer.
+          Copy-Item -Path 'backend_pack\*' -Destination $pack -Recurse -Force
+
+          @"
+          BlackLink External Backend Pack x64
+          Built: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss K')
+          slskd: 0.26.0 / SHA256 942299d8c97da6cc1f6cd82dcd4a3662b97b82fbd1742df4bec165b79357268a
+          Prowlarr: 2.5.2.5491 / SHA256 c5959a6cac7fa186e7360b70e0fe00f580aca20c1dec7e3f4f686a02f7d03039
+          qBittorrent: 5.2.3 x64 / installer SHA256 ff508e2f912d59c9eabaf03633ebacfd45c2049f38dcac027b8a7d7ad867ab2f
+          aMule: official Actions run 31881861606, commit 68eb98885dfcdaed407c9b0ace4dacd5fb8065ea
+          aMule inner package SHA256 a6d6bb99c325418891bbc3361693eb88aebfb48e08df636d7bc2de2ef1671d41
+          "@ | Set-Content -LiteralPath (Join-Path $pack 'VERSIONS.txt') -Encoding UTF8
+
+          "PACK_ROOT=$pack" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Smoke test first-run configuration and local APIs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $smoke = Join-Path $env:RUNNER_TEMP 'backend-smoke'
+          Copy-Item -LiteralPath $env:PACK_ROOT -Destination $smoke -Recurse -Force
+          $script = Join-Path $smoke 'BackendPack.ps1'
+          & $script -Action setup -NonInteractive -SoulseekUsername 'blacklink_ci_probe' -SoulseekPassword 'blacklink_ci_probe'
+
+          function Wait-LocalPort([int]$Port, [int]$Seconds) {
+            $deadline = (Get-Date).AddSeconds($Seconds)
+            while ((Get-Date) -lt $deadline) {
+              $client = New-Object Net.Sockets.TcpClient
+              try {
+                $iar = $client.BeginConnect('127.0.0.1', $Port, $null, $null)
+                if ($iar.AsyncWaitHandle.WaitOne(750) -and $client.Connected) { $client.EndConnect($iar); return $true }
+              } catch {} finally { $client.Close() }
+              Start-Sleep -Milliseconds 500
+            }
+            return $false
+          }
+
+          foreach ($port in @(5030,9696,8080,4713)) {
+            if (-not (Wait-LocalPort $port 60)) {
+              & $script -Action status
+              Get-ChildItem (Join-Path $smoke 'Data') -Recurse -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match 'log|conf|ini|xml|yml' } |
+                ForEach-Object { Write-Host "--- $($_.FullName)"; Get-Content $_.FullName -Tail 80 -ErrorAction SilentlyContinue }
+              throw "Smoke test failed: local port $port did not open"
+            }
+          }
+
+          # Verify unauthenticated local qBittorrent API path used by the BlackLink fallback.
+          $qbVersion = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8080/api/v2/app/version' -TimeoutSec 10
+          if ($qbVersion.StatusCode -ne 200) { throw 'qBittorrent local API check failed' }
+
+          # aMule REST version endpoint does not require login.
+          $amVersion = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:4713/api/v0/version' -TimeoutSec 10
+          if ($amVersion.StatusCode -ne 200) { throw 'amuleapi version check failed' }
+
+          & $script -Action stop
+          Start-Sleep -Seconds 2
+          Remove-Item -LiteralPath $smoke -Recurse -Force -ErrorAction SilentlyContinue
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:RUNNER_TEMP 'BlackLink_Backends_Ready_x64.zip'
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Compress-Archive -Path (Join-Path $env:PACK_ROOT '*') -DestinationPath $zip -CompressionLevel Optimal
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "Final ZIP SHA256: $hash"
+          "ZIP_PATH=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "ZIP_SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload ready bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: BlackLink_Backends_Ready_x64
+          path: ${{ env.ZIP_PATH }}
+          if-no-files-found: error
+          retention-days: 30
