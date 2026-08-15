@@ -52,10 +52,15 @@ jobs:
           git -C blacklink apply ../patches/GreyLink_Stage2_MakeDefs_hotfix.patch
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Validate StringDefs for MakeDefs
+      - name: Sanitize and validate StringDefs for MakeDefs
         shell: pwsh
         run: |
-          $lines = Get-Content "blacklink\client\StringDefs.h"
+          $path = "blacklink\client\StringDefs.h"
+          $text = Get-Content $path -Raw
+          $text = $text -replace '(?m)^[ \t]*// Additional UI strings localized by the Russian localization patch\r?\n', ''
+          $text = $text -replace '(?m)^[ \t]*// GreyBridge multi-network UI\r?\n', ''
+          [IO.File]::WriteAllText((Resolve-Path $path), $text, [Text.UTF8Encoding]::new($false))
+          $lines = Get-Content $path
           $bad = @()
           for ($i = 0; $i -lt $lines.Count; $i++) {
             $line = $lines[$i]
