@@ -10,33 +10,63 @@ jobs:
     runs-on: windows-2022
 
     steps:
-      - name: Checkout
+      - name: Checkout GreyLink CI
         uses: actions/checkout@v4
 
-      - name: Clone BlackLink upstream
+      - name: Reconstruct and verify GreyLink Stage 2 patch
+        shell: pwsh
+        run: |
+          $parts = Get-ChildItem "patches\ci2.part*" | Sort-Object Name
+          if ($parts.Count -ne 8) { throw "Expected 8 patch chunks, found $($parts.Count)" }
+          $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+          if ($b64.Length -ne 30604) { throw "Unexpected base64 length: $($b64.Length)" }
+          [IO.File]::WriteAllBytes("$PWD\GreyLink_Stage2_compile.patch.xz", [Convert]::FromBase64String($b64))
+          $xzHash = (Get-FileHash "$PWD\GreyLink_Stage2_compile.patch.xz" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($xzHash -ne 'ff95c6073cde34ff3af0e082c06e5131273f4544a9ee81686d7420d9aba7f05b') { throw "XZ SHA256 mismatch: $xzHash" }
+          cmd /c "7z x GreyLink_Stage2_compile.patch.xz -so > GreyLink_Stage2_compile.patch"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $patchHash = (Get-FileHash "$PWD\GreyLink_Stage2_compile.patch" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($patchHash -ne 'c120d913ac679d4b494d6ac7877b50c1e96beb431dac5bbc4912cf617ab31999') { throw "Patch SHA256 mismatch: $patchHash" }
+
+      - name: Clone pinned BlackLink upstream
         shell: pwsh
         run: |
           git clone https://github.com/zipper9/blacklink.git blacklink
-          cd blacklink
-          git checkout 1a72cfddca154da9070caca1b5a02df56d5498ab
+          git -C blacklink checkout 1a72cfddca154da9070caca1b5a02df56d5498ab
+          $actual = (git -C blacklink rev-parse HEAD).Trim()
+          if ($actual -ne '1a72cfddca154da9070caca1b5a02df56d5498ab') { throw "Wrong upstream commit: $actual" }
 
-      - name: Apply GreyLink patch
+      - name: Apply GreyLink Stage 2 patch
         shell: pwsh
         run: |
-          git -C blacklink apply ../patches/GreyLink_Stage2.patch
+          $patchExe = "C:\Program Files\Git\usr\bin\patch.exe"
+          if (-not (Test-Path $patchExe)) { throw "patch.exe not found: $patchExe" }
+          & $patchExe -p2 -d blacklink -i "$PWD\GreyLink_Stage2_compile.patch" --batch --forward
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Build
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build Release x64
         shell: pwsh
         run: |
-          msbuild blacklink\blacklink_2019.sln /m /p:Configuration=Release /p:Platform=x64
+          msbuild blacklink\blacklink_2019.sln /m /t:Build /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
 
-      - name: Package
+      - name: Verify executable
         shell: pwsh
         run: |
-          Compress-Archive -Path blacklink\compiled\* -DestinationPath GreyLink-x64.zip
+          if (-not (Test-Path "blacklink\compiled\blacklink_x64.exe")) { throw "blacklink_x64.exe was not produced" }
+          Get-Item "blacklink\compiled\blacklink_x64.exe" | Format-List Name,Length,LastWriteTime
+
+      - name: Package GreyLink
+        shell: pwsh
+        run: |
+          if (Test-Path GreyLink-x64.zip) { Remove-Item GreyLink-x64.zip -Force }
+          Compress-Archive -Path blacklink\compiled\* -DestinationPath GreyLink-x64.zip -CompressionLevel Optimal
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: GreyLink-x64
           path: GreyLink-x64.zip
+          if-no-files-found: error
