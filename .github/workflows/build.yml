@@ -44,13 +44,35 @@ jobs:
           & $patchExe -p2 -d blacklink -i "$PWD\GreyLink_Stage2_compile.patch" --batch --forward
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Apply MakeDefs hang hotfix
+        shell: pwsh
+        run: |
+          git -C blacklink apply --check ../patches/GreyLink_Stage2_MakeDefs_hotfix.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C blacklink apply ../patches/GreyLink_Stage2_MakeDefs_hotfix.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Validate StringDefs for MakeDefs
+        shell: pwsh
+        run: |
+          $lines = Get-Content "blacklink\client\StringDefs.h"
+          $bad = @()
+          for ($i = 0; $i -lt $lines.Count; $i++) {
+            $line = $lines[$i]
+            if ($line.Length -lt 5) { continue }
+            if ($line.Contains('// @Strings: ') -or $line.Contains('// @Names: ') -or $line.Contains('// @DontAdd') -or $line.Contains('// @Prolog: ')) { continue }
+            if (-not $line.Contains(',')) { $bad += "line $($i + 1): $line" }
+          }
+          if ($bad.Count -gt 0) { throw ("Unsafe StringDefs lines for MakeDefs:`n" + ($bad -join "`n")) }
+
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
       - name: Build Release x64
+        timeout-minutes: 30
         shell: pwsh
         run: |
-          msbuild blacklink\blacklink_2019.sln /m /t:Build /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+          msbuild blacklink\blacklink_2019.sln /m /t:Build /p:Configuration=Release /p:Platform=x64 /verbosity:normal
 
       - name: Verify executable
         shell: pwsh
