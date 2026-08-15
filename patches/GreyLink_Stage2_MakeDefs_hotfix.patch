@@ -15,23 +15,3 @@ index 5eb9640..77bfd77 100644
  			{
  				if (s[k] == '_')
  				{
-diff --git a/client/StringDefs.h b/client/StringDefs.h
-index bdf5f01..e458e28 100644
---- a/client/StringDefs.h
-+++ b/client/StringDefs.h
-@@ -1991,7 +1991,6 @@ enum Strings   // @DontAdd
- 	CMD_HELP_ME, // "#message\tSpeak in third person"
- 	CMD_HELP_LAST_NICK, // "#message\tAppend last inserted nick"
- 	CMD_HELP_IP_UPDATE, // "[v4 | v6]\tGet public IP address"
--	// Additional UI strings localized by the Russian localization patch
- 	UI_SETTINGS_CHANGED_ADJUSTED, // "Values of the changed settings are automatically adjusted"
- 	DOWNLOAD_FILE_BY_NAME, // "Download file by name"
- 	DOWNLOAD_FILE_BY_NAME_DOTS, // "Download file by name..."
-@@ -2005,7 +2004,6 @@ enum Strings   // @DontAdd
- 	FILTER_EXCLUDE, // "Exclude"
- 	CRASH_INFO_GENERATED, // "exceptioninfo.txt was generated"
- 
--	// GreyBridge multi-network UI
- 	GREYBRIDGE_SETTINGS, // "GreyBridge settings"
- 	GREYBRIDGE_ENABLED, // "Enabled"
- 	GREYBRIDGE_SOULSEEK, // "Soulseek / slskd"
