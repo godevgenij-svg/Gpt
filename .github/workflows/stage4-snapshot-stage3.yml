@@ -2,6 +2,10 @@ name: Stage 4 snapshot exact Stage 3 sources
 
 on:
   workflow_dispatch:
+  push:
+    branches: [ stage4-ed2k-from-stage3 ]
+    paths:
+      - '.github/workflows/stage4-snapshot-stage3.yml'
 
 permissions:
   contents: write
