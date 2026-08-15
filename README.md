@@ -1,11 +1,11 @@
-# GreyLink CI
+# BlackLink custom build CI
 
-Сборочный репозиторий проекта GreyLink / BlackLink-Grey.
-
-Назначение: воспроизводимая Windows x64 сборка модифицированного BlackLink через GitHub Actions.
+Воспроизводимая Windows x64 сборка модифицированного BlackLink через GitHub Actions.
 
 База upstream: `zipper9/blacklink` commit `1a72cfddca154da9070caca1b5a02df56d5498ab`.
 
-Текущий этап: GreyBridge Stage 2 (DC/NMDC/ADC + Soulseek/slskd + Torznab + qBittorrent integration).
+Текущий этап: Stage 3 — встроенный External Search / Search Providers для внешних источников, полный sharp-русский перевод и подготовка единого интерфейса поиска.
 
-Исходный код BlackLink не дублируется в этом репозитории: CI получает точную upstream-версию и применяет патч GreyLink. Это уменьшает репозиторий и позволяет однозначно воспроизводить сборку.
+Сейчас внешний поиск включает уже реализованные адаптеры Soulseek/slskd и Torznab; qBittorrent используется как внешний загрузчик для торрент-направления. Старое название GreyBridge сохраняется только там, где оно необходимо для одноразовой миграции старого `GreyBridge.xml` в `ExternalSearch.xml`.
+
+Исходный код BlackLink целиком в этом репозитории не дублируется: CI получает закреплённую upstream-версию и применяет проверяемые патчи. Все крупные патчи и локализация восстанавливаются из chunk-файлов с проверкой SHA256 перед сборкой.
