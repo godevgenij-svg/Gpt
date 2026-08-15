@@ -1,0 +1,84 @@
+name: Diagnose backend pack v7
+
+on:
+  push:
+    branches: [ backend-pack-ready ]
+    paths: [ '.github/workflows/diag-backend-v7.yml' ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Diagnose local APIs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'
+          function WP($p,$s=25){$e=(Get-Date).AddSeconds($s);while((Get-Date)-lt$e){$c=New-Object Net.Sockets.TcpClient;try{$a=$c.BeginConnect('127.0.0.1',$p,$null,$null);if($a.AsyncWaitHandle.WaitOne(500)-and$c.Connected){$c.EndConnect($a);return $true}}catch{}finally{$c.Close()};Start-Sleep -Milliseconds 300};$false}
+          $tmp=Join-Path $env:RUNNER_TEMP ('v7diag-'+[guid]::NewGuid().ToString('N'));New-Item -ItemType Directory $tmp -Force|Out-Null
+          try {
+            # qBittorrent
+            $q=Join-Path $tmp q.exe;& curl.exe -fL 'https://github.com/qbittorrent/qBittorrent/releases/download/release-5.2.3/qbittorrent_5.2.3_x64_setup.exe' -o $q
+            $qd=Join-Path $tmp qb;$p=Start-Process $q -ArgumentList @('/S',"/D=$qd") -Wait -PassThru;if($p.ExitCode-ne0){throw 'q install failed'}
+            $prof=Join-Path $tmp profile;$cfg=Join-Path $prof 'qBittorrent\config';New-Item -ItemType Directory $cfg -Force|Out-Null
+            $save=(Join-Path $tmp downloads).Replace('\','/')+'/';New-Item -ItemType Directory (Join-Path $tmp downloads) -Force|Out-Null
+            @"
+          [LegalNotice]
+          Accepted=true
+
+          [Preferences]
+          Downloads\SavePath=$save
+          General\NoSplashScreen=true
+          WebUI\Enabled=true
+          WebUI\Address=127.0.0.1
+          WebUI\Port=8080
+          WebUI\HTTPS\Enabled=false
+          WebUI\LocalHostAuth=false
+          WebUI\Username=blacklink
+          WebUI\Password_PBKDF2="@ByteArray(+nqIve0kGenX6Anl3N+SPA==:Lyx2vXZFlnU2k+27EvmMHddocLMRcNuu4+1/T6gojxcekfxUH0wxr51rKwKc/KpdNMGZe/4WpH0dtKBi9LzhaQ==)"
+          WebUI\CSRFProtection=true
+          WebUI\HostHeaderValidation=true
+          WebUI\ClickjackingProtection=true
+          WebUI\UseUPnP=false
+          "@|Set-Content (Join-Path $cfg qBittorrent.ini) -Encoding UTF8
+            $qp=Start-Process (Join-Path $qd qbittorrent.exe) -ArgumentList @("--profile=$prof",'--confirm-legal-notice','--no-splash','--webui-port=8080') -WindowStyle Hidden -PassThru
+            Write-Host "QBIT=$(WP 8080 25) exited=$($qp.HasExited)";Get-Content (Join-Path $cfg qBittorrent.ini)|Out-Host
+            if(Test-Path (Join-Path $prof 'qBittorrent\data\logs\qbittorrent.log')){Get-Content (Join-Path $prof 'qBittorrent\data\logs\qbittorrent.log') -Tail 100|Out-Host}
+
+            # Prowlarr
+            $pz=Join-Path $tmp p.zip;& curl.exe -fL 'https://github.com/Prowlarr/Prowlarr/releases/download/v2.5.2.5491/Prowlarr.master.2.5.2.5491.windows-core-x64.zip' -o $pz;$pd=Join-Path $tmp p;Expand-Archive $pz $pd -Force;$px=Get-ChildItem $pd -Recurse -File -Filter Prowlarr.exe|Select-Object -First 1
+            $pdat=Join-Path $tmp pdata;New-Item -ItemType Directory $pdat -Force|Out-Null;$key='0123456789abcdef0123456789abcdef'
+            @"
+          <Config><BindAddress>127.0.0.1</BindAddress><Port>9696</Port><EnableSsl>False</EnableSsl><LaunchBrowser>False</LaunchBrowser><ApiKey>$key</ApiKey><AuthenticationMethod>None</AuthenticationMethod></Config>
+          "@|Set-Content (Join-Path $pdat config.xml) -Encoding UTF8
+            $pp=Start-Process $px.FullName -ArgumentList @("-data=$pdat",'-nobrowser') -WindowStyle Hidden -PassThru;Write-Host "PROWLARR=$(WP 9696 25) exited=$($pp.HasExited)";Start-Sleep 1;Get-Content (Join-Path $pdat config.xml)|Out-Host
+            try{$r=Invoke-WebRequest -UseBasicParsing ('http://127.0.0.1:9696/api/v1/indexer?apikey='+$key)-TimeoutSec 5;Write-Host "PAPI=$($r.StatusCode)"}catch{Write-Host "PAPIERR=$($_.Exception.Message)"}
+
+            # aMule
+            $az=Join-Path $tmp a.zip;& curl.exe -fL 'https://nightly.link/amule-org/amule/actions/artifacts/9246296823.zip' -o $az;$ao=Join-Path $tmp ao;Expand-Archive $az $ao -Force;$inner=Get-ChildItem $ao -Recurse -File -Filter '*Windows-x64*.zip'|Select-Object -First 1;$ad=Join-Path $tmp am;Expand-Archive $inner.FullName $ad -Force;$bin=(Get-ChildItem $ad -Recurse -File -Filter amuleapi.exe|Select-Object -First 1).Directory.FullName
+            $ac=Join-Path $tmp ac;New-Item -ItemType Directory $ac -Force|Out-Null
+            @"
+          [AmuleApi]
+          Enabled=1
+          BindAddress=127.0.0.1
+          HttpPort=4713
+          Path=$(Join-Path $bin amuleapi.exe)
+
+          [eMule]
+          FirstRunWizardDone=1
+
+          [ExternalConnect]
+          AcceptExternalConnections=1
+          RequireEncryption=0
+          ECAddress=127.0.0.1
+          ECPort=4712
+          "@|Set-Content (Join-Path $ac amule.conf) -Encoding UTF8
+            & (Join-Path $bin amuleapi.exe) "--config-dir=$ac" '--set-admin-pass=diagpassword'
+            $ap=Start-Process (Join-Path $bin amuled.exe) -ArgumentList @("--config-dir=$ac") -RedirectStandardOutput (Join-Path $ac out.log) -RedirectStandardError (Join-Path $ac err.log) -PassThru
+            Write-Host "AMULEAPI=$(WP 4713 35) amuledExited=$($ap.HasExited)";Get-Content (Join-Path $ac amule.conf)|Out-Host;if(Test-Path (Join-Path $ac out.log)){Get-Content (Join-Path $ac out.log)-Tail 120|Out-Host};if(Test-Path (Join-Path $ac amuleapi.log)){Get-Content (Join-Path $ac amuleapi.log)-Tail 120|Out-Host}
+          } finally {Get-Process -ErrorAction SilentlyContinue|Where-Object{$_.ProcessName-match'qbittorrent|Prowlarr|amule'}|Stop-Process -Force -ErrorAction SilentlyContinue}
