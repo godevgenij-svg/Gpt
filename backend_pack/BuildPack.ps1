@@ -57,7 +57,7 @@ try {
     New-Item -ItemType Directory -Path $amOut -Force | Out-Null
     if ($inner) {
         $innerHash = (Get-FileHash -LiteralPath $inner.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($innerHash -ne 'a6d6bb99c325418891bbc3361693eb88aebfb48e08df636d7bc2de2ef1671d41') { throw "Unexpected aMule inner package SHA256: $innerHash" }
+        if ($innerHash -ne 'a6d6bb99e064b67951608760bd4e095720847abb1402c135c0b79a5bf68fe559') { throw "Unexpected aMule inner package SHA256: $innerHash" }
         Expand-Archive -LiteralPath $inner.FullName -DestinationPath $amOut -Force
     } else {
         Copy-Item -Path (Join-Path $amOuter '*') -Destination $amOut -Recurse -Force
@@ -77,7 +77,7 @@ slskd 0.26.0 SHA256 942299d8c97da6cc1f6cd82dcd4a3662b97b82fbd1742df4bec165b79357
 Prowlarr 2.5.2.5491 SHA256 c5959a6cac7fa186e7360b70e0fe00f580aca20c1dec7e3f4f686a02f7d03039
 qBittorrent 5.2.3 x64 installer SHA256 ff508e2f912d59c9eabaf03633ebacfd45c2049f38dcac027b8a7d7ad867ab2f
 aMule official Actions run 31881861606 artifact 9246296823 commit 68eb98885dfcdaed407c9b0ace4dacd5fb8065ea
-aMule inner package SHA256 a6d6bb99c325418891bbc3361693eb88aebfb48e08df636d7bc2de2ef1671d41
+aMule inner package SHA256 a6d6bb99e064b67951608760bd4e095720847abb1402c135c0b79a5bf68fe559
 "@ | Set-Content -LiteralPath (Join-Path $pack 'VERSIONS.txt') -Encoding UTF8
 
     # Smoke test in a disposable clone so the shipped archive remains first-run clean.
