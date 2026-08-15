@@ -1,0 +1,42 @@
+name: Build GreyLink x64
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Clone BlackLink upstream
+        shell: pwsh
+        run: |
+          git clone https://github.com/zipper9/blacklink.git blacklink
+          cd blacklink
+          git checkout 1a72cfddca154da9070caca1b5a02df56d5498ab
+
+      - name: Apply GreyLink patch
+        shell: pwsh
+        run: |
+          git -C blacklink apply ../patches/GreyLink_Stage2.patch
+
+      - name: Build
+        shell: pwsh
+        run: |
+          msbuild blacklink\blacklink_2019.sln /m /p:Configuration=Release /p:Platform=x64
+
+      - name: Package
+        shell: pwsh
+        run: |
+          Compress-Archive -Path blacklink\compiled\* -DestinationPath GreyLink-x64.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GreyLink-x64
+          path: GreyLink-x64.zip
