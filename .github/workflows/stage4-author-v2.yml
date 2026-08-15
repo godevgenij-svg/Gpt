@@ -1,0 +1,111 @@
+name: Stage 4 author v2
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ stage4-ed2k-from-stage3 ]
+    paths:
+      - 'stage4/rewrite_stage4_fix.py'
+      - 'stage4/reconstruct_stage3.ps1'
+      - '.github/workflows/stage4-author-v2.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  author:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: stage4-ed2k-from-stage3
+          fetch-depth: 0
+
+      - name: Reconstruct exact Stage 3
+        shell: pwsh
+        run: ./stage4/reconstruct_stage3.ps1
+
+      - name: Reconstruct verified donor scaffold
+        shell: pwsh
+        run: |
+          git fetch origin stage4-amule-report --depth=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $b64 = git show FETCH_HEAD:patches/stage4.b64
+          $b64 = ($b64 -join "`n").Trim()
+          if ($b64.Length -ne 16592) { throw "Unexpected donor base64 length: $($b64.Length)" }
+          [IO.File]::WriteAllBytes("$PWD\Stage4-donor.patch.xz", [Convert]::FromBase64String($b64))
+          if ((Get-FileHash "$PWD\Stage4-donor.patch.xz" -Algorithm SHA256).Hash.ToLowerInvariant() -ne '436973d902c0b40df908de961eb829f86fca86b6e436febc013b4a32b3bc6815') { throw 'Donor XZ hash mismatch' }
+          cmd /c "7z x Stage4-donor.patch.xz -so > Stage4-donor.patch"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ((Get-FileHash "$PWD\Stage4-donor.patch" -Algorithm SHA256).Hash.ToLowerInvariant() -ne '1828691e8cd7407b915f1dcd5ae7d54a3243787eddce36610b65851098e4b063') { throw 'Donor patch hash mismatch' }
+          git -C blacklink apply --check ../Stage4-donor.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C blacklink apply ../Stage4-donor.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Rewrite against verified API contract
+        shell: pwsh
+        run: |
+          python stage4/rewrite_stage4.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python stage4/rewrite_stage4_fix.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C blacklink diff --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Validate provider-only boundary
+        shell: pwsh
+        run: |
+          $allowed = @('client/ExternalSearchManager.cpp','client/ExternalSearchManager.h','client/ExternalSearchResult.h','client/StringDefs.h','compiled/Settings/ExternalSearch.xml','windows/ExternalSearchSettingsDlg.cpp','windows/ExternalSearchSettingsDlg.h','windows/SearchFrm.cpp','windows/resource.h','windows/resources.rc')
+          $changed = @(git -C blacklink diff --name-only HEAD)
+          if ($changed.Count -eq 0) { throw 'Stage 4 produced no changes' }
+          foreach ($f in $changed) { if ($allowed -notcontains $f) { throw "Unexpected Stage 4 file: $f" } }
+          $native = @($changed | Where-Object { $_ -match '(^|/)(Nmdc|Adc|ClientManager|SearchManager|QueueManager)\.' })
+          if ($native.Count -ne 0) { throw "Native DC core changed: $($native -join ', ')" }
+          $changed | ForEach-Object { Write-Host "Stage4: $_" }
+
+      - name: Generate standalone Stage 4 patch
+        shell: pwsh
+        run: |
+          Remove-Item stage4/new -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force stage4/new/source | Out-Null
+          cmd /c "git -C blacklink diff --binary HEAD > stage4-new.patch"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Move-Item stage4-new.patch stage4/new/Stage4.patch -Force
+          if ((Get-Item stage4/new/Stage4.patch).Length -le 0) { throw 'Stage 4 patch is empty' }
+          $changed = @(git -C blacklink diff --name-only HEAD)
+          [IO.File]::WriteAllLines((Join-Path $PWD 'stage4/new/CHANGED_FILES.txt'), $changed, [Text.UTF8Encoding]::new($false))
+          foreach ($rel in $changed) {
+            $src = Join-Path blacklink $rel
+            if (-not (Test-Path $src -PathType Leaf)) { continue }
+            $dst = Join-Path 'stage4/new/source' $rel
+            New-Item -ItemType Directory -Force (Split-Path $dst -Parent) | Out-Null
+            Copy-Item $src $dst -Force
+          }
+          $sha = (Get-FileHash stage4/new/Stage4.patch -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllLines((Join-Path $PWD 'stage4/new/README.txt'), @('Stage 4 eD2k/Kad standalone delta','Base: exact Stage 3 / 4405d3d496dffaf29a51bad887d48c4bae23a25f',"Patch SHA256: $sha",'Final build applies only this patch directly to Stage 3.'), [Text.UTF8Encoding]::new($false))
+
+      - name: Reapply standalone patch from clean Stage 3
+        shell: pwsh
+        run: |
+          git -C blacklink reset --hard HEAD
+          git -C blacklink clean -fd
+          git -C blacklink apply --check ../stage4/new/Stage4.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C blacklink apply ../stage4/new/Stage4.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C blacklink diff --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $expected = @(Get-Content stage4/new/CHANGED_FILES.txt | Where-Object { $_.Trim() })
+          $actual = @(git -C blacklink diff --name-only HEAD)
+          if (($expected -join "`n") -ne ($actual -join "`n")) { throw 'Standalone patch changed-file mismatch' }
+
+      - name: Commit generated Stage 4
+        shell: pwsh
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add stage4/new
+          if (git diff --cached --quiet) { Write-Host 'Generated Stage 4 already current'; exit 0 }
+          git commit -m 'stage4: generate standalone eD2k Kad delta from Stage 3'
+          git push origin HEAD:stage4-ed2k-from-stage3
