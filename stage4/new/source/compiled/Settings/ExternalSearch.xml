@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ExternalSearch Version="4">
+  <!--
+    Soulseek backend: slskd (https://github.com/slskd/slskd)
+    Set Enabled="1", BaseUrl to the local slskd web/API address and ApiKey to a key configured in slskd.
+  -->
+  <Soulseek Enabled="0" BaseUrl="http://127.0.0.1:5030" ApiKey="" SearchTimeout="15" FileLimit="1000" ResponseLimit="100" />
+
+  <!--
+    eD2k/Kad backend via the official aMule amuleapi REST service.
+    amuleapi listens on 127.0.0.1:4713 by default and talks to aMule/amuled EC internally on 4712.
+    Plain HTTP is accepted only for loopback. Use HTTPS through a reverse proxy for a remote amuleapi.
+  -->
+  <Amule Enabled="0" BaseUrl="http://127.0.0.1:4713" Password="" SearchType="global" SearchTimeout="60" ResultLimit="1000" />
+
+  <!--
+    qBittorrent WebUI API download backend. API key (Bearer) is preferred on current qBittorrent.
+    Username/password is kept for older installations using cookie sessions. Keep the WebUI local when possible.
+  -->
+  <QBittorrent Enabled="0" BaseUrl="http://127.0.0.1:8080" ApiKey="" Username="" Password="" SavePath="" Category="" />
+
+  <!--
+    Generic Torznab search. Works with a Torznab endpoint from Prowlarr/Jackett or another compatible service.
+    Url may be a normal endpoint (the client appends t=search&amp;q=...) or a template containing {query} and {apikey}.
+  -->
+  <Torznab>
+    <Source Enabled="0" Name="Prowlarr" Url="http://127.0.0.1:9696/1/api" ApiKey="" />
+  </Torznab>
+</ExternalSearch>

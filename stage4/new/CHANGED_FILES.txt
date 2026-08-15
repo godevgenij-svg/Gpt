@@ -1,0 +1,10 @@
+client/ExternalSearchManager.cpp
+client/ExternalSearchManager.h
+client/ExternalSearchResult.h
+client/StringDefs.h
+compiled/Settings/ExternalSearch.xml
+windows/ExternalSearchSettingsDlg.cpp
+windows/ExternalSearchSettingsDlg.h
+windows/SearchFrm.cpp
+windows/resource.h
+windows/resources.rc
