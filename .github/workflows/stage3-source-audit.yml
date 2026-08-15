@@ -1,0 +1,118 @@
+name: Stage 3 source audit
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ stage3-source-audit ]
+
+jobs:
+  audit:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout audit branch
+        uses: actions/checkout@v4
+
+      - name: Reconstruct and verify Stage 2 base patch
+        shell: pwsh
+        run: |
+          $parts = Get-ChildItem "patches\ci2.part*" | Sort-Object Name
+          if ($parts.Count -ne 8) { throw "Expected 8 Stage 2 chunks, found $($parts.Count)" }
+          $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+          if ($b64.Length -ne 30604) { throw "Unexpected Stage 2 base64 length: $($b64.Length)" }
+          [IO.File]::WriteAllBytes("$PWD\Stage2.patch.xz", [Convert]::FromBase64String($b64))
+          $xzHash = (Get-FileHash "$PWD\Stage2.patch.xz" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($xzHash -ne 'ff95c6073cde34ff3af0e082c06e5131273f4544a9ee81686d7420d9aba7f05b') { throw "Stage 2 XZ SHA256 mismatch: $xzHash" }
+          cmd /c "7z x Stage2.patch.xz -so > Stage2.patch"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $patchHash = (Get-FileHash "$PWD\Stage2.patch" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($patchHash -ne 'c120d913ac679d4b494d6ac7877b50c1e96beb431dac5bbc4912cf617ab31999') { throw "Stage 2 patch SHA256 mismatch: $patchHash" }
+
+      - name: Clone pinned BlackLink upstream
+        shell: pwsh
+        run: |
+          git clone https://github.com/zipper9/blacklink.git blacklink
+          git -C blacklink checkout 1a72cfddca154da9070caca1b5a02df56d5498ab
+          $actual = (git -C blacklink rev-parse HEAD).Trim()
+          if ($actual -ne '1a72cfddca154da9070caca1b5a02df56d5498ab') { throw "Wrong upstream commit: $actual" }
+
+      - name: Apply exact Stage 2 foundation
+        shell: pwsh
+        run: |
+          $patchExe = "C:\Program Files\Git\usr\bin\patch.exe"
+          & $patchExe -p2 -d blacklink -i "$PWD\Stage2.patch" --batch --forward
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C blacklink apply --check ../patches/GreyLink_Stage2_MakeDefs_hotfix.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C blacklink apply ../patches/GreyLink_Stage2_MakeDefs_hotfix.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $patchExe -p2 -d blacklink -i "$PWD\patches\GreyLink_Stage2_compilefix1.patch" --batch --forward
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $patchExe -p1 -d blacklink -i "$PWD\patches\GreyLink_RU_runtimefix.patch" --batch --forward
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Sanitize StringDefs exactly as Stage 3 CI
+        shell: pwsh
+        run: |
+          $path = "blacklink\client\StringDefs.h"
+          $text = Get-Content $path -Raw
+          $text = $text -replace '(?m)^[ \t]*// Additional UI strings localized by the Russian localization patch\r?\n', ''
+          $text = $text -replace '(?m)^[ \t]*// GreyBridge multi-network UI\r?\n', ''
+          [IO.File]::WriteAllText((Resolve-Path $path), $text, [Text.UTF8Encoding]::new($false))
+
+      - name: Snapshot Stage 2 foundation
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force audit | Out-Null
+          git -C blacklink diff --name-status | Out-File audit\stage2-foundation-files.txt -Encoding utf8
+          git -C blacklink diff --stat | Out-File audit\stage2-foundation-stat.txt -Encoding utf8
+
+      - name: Reconstruct verify and apply exact Stage 3 patch
+        shell: pwsh
+        run: |
+          $parts = Get-ChildItem "patches\stage3.part*" | Sort-Object Name
+          if ($parts.Count -ne 4) { throw "Expected 4 Stage 3 chunks, found $($parts.Count)" }
+          $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+          if ($b64.Length -ne 24024) { throw "Unexpected Stage 3 base64 length: $($b64.Length)" }
+          [IO.File]::WriteAllBytes("$PWD\Stage3.patch.xz", [Convert]::FromBase64String($b64))
+          $xzHash = (Get-FileHash "$PWD\Stage3.patch.xz" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($xzHash -ne 'ed453da31122b6cec97566b119ff119c25cf34f9d3cc4b7b7cfd94b40926f8ff') { throw "Stage 3 XZ SHA256 mismatch: $xzHash" }
+          cmd /c "7z x Stage3.patch.xz -so > Stage3.patch"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $patchHash = (Get-FileHash "$PWD\Stage3.patch" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($patchHash -ne '54eb0e38f49c355f48c4c0894dbd527bc5aa446295b8ea681aa233c52cabc58c') { throw "Stage 3 patch SHA256 mismatch: $patchHash" }
+          Copy-Item Stage3.patch audit\Stage3.patch
+          git -C blacklink apply --check ../Stage3.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C blacklink apply ../Stage3.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C blacklink diff --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Collect exact Stage 3 source
+        shell: pwsh
+        run: |
+          git -C blacklink diff --name-status | Out-File audit\full-stage3-files.txt -Encoding utf8
+          git -C blacklink diff --stat | Out-File audit\full-stage3-stat.txt -Encoding utf8
+          New-Item -ItemType Directory -Force audit\client, audit\windows, audit\compiled\Settings | Out-Null
+          Get-ChildItem blacklink\client\ExternalSearch* -File | Copy-Item -Destination audit\client
+          Get-ChildItem blacklink\windows\ExternalSearch* -File | Copy-Item -Destination audit\windows
+          Copy-Item blacklink\compiled\Settings\ExternalSearch.xml audit\compiled\Settings\ExternalSearch.xml
+          $stage3Files = Select-String -Path Stage3.patch -Pattern '^diff --git a/(.+?) b/(.+)$' | ForEach-Object { $_.Matches[0].Groups[2].Value }
+          $stage3Files | Set-Content audit\stage3-patch-files.txt -Encoding utf8
+          foreach ($rel in $stage3Files) {
+            $src = Join-Path blacklink $rel
+            if (Test-Path $src -PathType Leaf) {
+              $dst = Join-Path audit (Join-Path 'stage3-files' $rel)
+              New-Item -ItemType Directory -Force (Split-Path -Parent $dst) | Out-Null
+              Copy-Item $src $dst
+            }
+          }
+          Get-FileHash Stage3.patch -Algorithm SHA256 | Format-List | Out-File audit\stage3-patch-sha256.txt -Encoding utf8
+
+      - name: Upload Stage 3 source audit
+        uses: actions/upload-artifact@v4
+        with:
+          name: Stage3-source-audit
+          path: audit
+          if-no-files-found: error
+          retention-days: 30
