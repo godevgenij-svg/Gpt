@@ -1,5 +1,5 @@
 diff --git a/client/ExternalSearchManager.cpp b/client/ExternalSearchManager.cpp
-index bc5c165fe..00bda5d09 100644
+index bc5c165fe..8b5ecdcb5 100644
 --- a/client/ExternalSearchManager.cpp
 +++ b/client/ExternalSearchManager.cpp
 @@ -18,6 +18,7 @@ namespace
@@ -10,7 +10,7 @@ index bc5c165fe..00bda5d09 100644
  
  	static string remoteFileName(const string& path)
  	{
-@@ -43,6 +44,201 @@ namespace
+@@ -43,6 +44,199 @@ namespace
  		}
  	};
  
@@ -160,9 +160,7 @@ index bc5c165fe..00bda5d09 100644
 +		void emit(const string& name, const string& backendId) noexcept
 +		{
 +			if (name.empty() || item.hash.empty() || results.size() >= static_cast<size_t>(resultLimit)) return;
-+			const string key = item.hash + "
-+" + Util::toString(item.size) + "
-+" + (backendId.empty() ? string("parent") : backendId);
++			const string key = item.hash + "\n" + Util::toString(item.size) + "\n" + (backendId.empty() ? string("parent") : backendId);
 +			if (!seen.insert(key).second) return;
 +			ExternalSearch::Result r;
 +			r.ownerId = ownerId;
@@ -212,7 +210,7 @@ index bc5c165fe..00bda5d09 100644
  	class SlskdResponsesParser : public JsonParser
  	{
  	public:
-@@ -227,6 +423,7 @@ string ExternalSearchManager::trimTrailingSlash(string s)
+@@ -227,6 +421,7 @@ string ExternalSearchManager::trimTrailingSlash(string s)
  void ExternalSearchManager::reloadConfig() noexcept
  {
  	SoulseekConfig newSoulseek;
@@ -220,7 +218,7 @@ index bc5c165fe..00bda5d09 100644
  	QbittorrentConfig newQbittorrent;
  	std::vector<TorznabSource> newTorznab;
  	const string newPath = configPath();
-@@ -252,6 +449,18 @@ void ExternalSearchManager::reloadConfig() noexcept
+@@ -252,6 +447,18 @@ void ExternalSearchManager::reloadConfig() noexcept
  				newSoulseek.responseLimit = std::max(1, xml.getIntChildAttrib("ResponseLimit", newSoulseek.responseLimit));
  			}
  			xml.resetCurrentChild();
@@ -239,7 +237,7 @@ index bc5c165fe..00bda5d09 100644
  			if (xml.findChild("QBittorrent"))
  			{
  				newQbittorrent.enabled = xml.getBoolChildAttrib("Enabled");
-@@ -290,28 +499,30 @@ void ExternalSearchManager::reloadConfig() noexcept
+@@ -290,28 +497,30 @@ void ExternalSearchManager::reloadConfig() noexcept
  	{
  		LOCK(cs);
  		soulseek = newSoulseek;
@@ -274,7 +272,7 @@ index bc5c165fe..00bda5d09 100644
  		xml.stepIn();
  
  		xml.addTag("Soulseek");
-@@ -322,6 +533,14 @@ bool ExternalSearchManager::saveConfig(const SoulseekConfig& newSoulseek, const
+@@ -322,6 +531,14 @@ bool ExternalSearchManager::saveConfig(const SoulseekConfig& newSoulseek, const
  		xml.addChildAttrib("FileLimit", std::max(1, newSoulseek.fileLimit));
  		xml.addChildAttrib("ResponseLimit", std::max(1, newSoulseek.responseLimit));
  
@@ -289,7 +287,7 @@ index bc5c165fe..00bda5d09 100644
  		xml.addTag("QBittorrent");
  		xml.addChildAttrib("Enabled", newQbittorrent.enabled);
  		xml.addChildAttrib("BaseUrl", trimTrailingSlash(newQbittorrent.baseUrl));
-@@ -369,11 +588,12 @@ bool ExternalSearchManager::saveConfig(const SoulseekConfig& newSoulseek, const
+@@ -369,11 +586,12 @@ bool ExternalSearchManager::saveConfig(const SoulseekConfig& newSoulseek, const
  	}
  }
  
@@ -303,7 +301,7 @@ index bc5c165fe..00bda5d09 100644
  	outQbittorrent = qbittorrent;
  	outTorznab = torznab;
  }
-@@ -383,6 +603,7 @@ bool ExternalSearchManager::hasEnabledBackends() const noexcept
+@@ -383,6 +601,7 @@ bool ExternalSearchManager::hasEnabledBackends() const noexcept
  	LOCK(cs);
  	if (stopped) return false;
  	if (soulseek.enabled && !soulseek.baseUrl.empty()) return true;
@@ -311,7 +309,7 @@ index bc5c165fe..00bda5d09 100644
  	for (const auto& source : torznab)
  		if (source.enabled && !source.url.empty()) return true;
  	return false;
-@@ -394,11 +615,13 @@ unsigned ExternalSearchManager::search(const string& query, uint64_t ownerId) no
+@@ -394,11 +613,13 @@ unsigned ExternalSearchManager::search(const string& query, uint64_t ownerId) no
  	cancelSearch(ownerId);
  	unsigned maxTime = 0;
  	SoulseekConfig sc;
@@ -325,7 +323,7 @@ index bc5c165fe..00bda5d09 100644
  		tz = torznab;
  	}
  	if (sc.enabled && !sc.baseUrl.empty())
-@@ -406,6 +629,18 @@ unsigned ExternalSearchManager::search(const string& query, uint64_t ownerId) no
+@@ -406,6 +627,18 @@ unsigned ExternalSearchManager::search(const string& query, uint64_t ownerId) no
  		startSoulseekSearch(query, ownerId);
  		maxTime = std::max<unsigned>(maxTime, (unsigned) (sc.searchTimeout + 5) * 1000);
  	}
@@ -344,7 +342,7 @@ index bc5c165fe..00bda5d09 100644
  	for (size_t i = 0; i < tz.size(); ++i)
  	{
  		if (tz[i].enabled && !tz[i].url.empty())
-@@ -602,6 +837,357 @@ void ExternalSearchManager::startQbittorrentAdd(const QbittorrentConfig& qc, con
+@@ -602,6 +835,357 @@ void ExternalSearchManager::startQbittorrentAdd(const QbittorrentConfig& qc, con
  	httpClient.startRequest(requestId);
  }
  
@@ -702,7 +700,7 @@ index bc5c165fe..00bda5d09 100644
  void ExternalSearchManager::startTorznabSearch(const string& query, uint64_t ownerId, int sourceIndex) noexcept
  {
  	TorznabSource source;
-@@ -759,6 +1345,30 @@ void ExternalSearchManager::on(HttpClientListener::Completed, uint64_t id, const
+@@ -759,6 +1343,30 @@ void ExternalSearchManager::on(HttpClientListener::Completed, uint64_t id, const
  	if (!found) return;
  	const int code = resp.getResponseCode();
  
@@ -733,7 +731,7 @@ index bc5c165fe..00bda5d09 100644
  	// qBittorrent session cookies may expire. Retry a single time by logging in
  	// again, but never retry API-key authentication or recurse indefinitely.
  	if (p.kind == REQ_QBT_ADD && (code == 401 || code == 403) && p.retryCount == 0)
-@@ -778,6 +1388,12 @@ void ExternalSearchManager::on(HttpClientListener::Completed, uint64_t id, const
+@@ -778,6 +1386,12 @@ void ExternalSearchManager::on(HttpClientListener::Completed, uint64_t id, const
  
  	if (code < 200 || code >= 300)
  	{
@@ -746,7 +744,7 @@ index bc5c165fe..00bda5d09 100644
  		string suffix;
  		if (!data.responseBody.empty())
  		{
-@@ -790,6 +1406,88 @@ void ExternalSearchManager::on(HttpClientListener::Completed, uint64_t id, const
+@@ -790,6 +1404,88 @@ void ExternalSearchManager::on(HttpClientListener::Completed, uint64_t id, const
  		return;
  	}
  
@@ -835,7 +833,7 @@ index bc5c165fe..00bda5d09 100644
  	if (p.kind == REQ_QBT_LOGIN)
  	{
  		const string cookie = extractSessionCookie(resp);
-@@ -887,14 +1585,18 @@ void ExternalSearchManager::on(HttpClientListener::Failed, uint64_t id, const st
+@@ -887,14 +1583,18 @@ void ExternalSearchManager::on(HttpClientListener::Failed, uint64_t id, const st
  		if (i != pending.end()) { p = i->second; pending.erase(i); found = true; }
  		if (found && p.kind == REQ_SLSK_RESPONSES)
  			for (auto& s : activeSoulseek) if (s.pollReqId == id) { s.pollReqId = 0; s.nextPoll = GET_TICK() + SLSKD_POLL_INTERVAL; break; }
@@ -855,7 +853,7 @@ index bc5c165fe..00bda5d09 100644
  	{
  		LOCK(cs);
  		if (stopped) return;
-@@ -902,33 +1604,58 @@ void ExternalSearchManager::on(TimerManagerListener::Second, uint64_t tick) noex
+@@ -902,33 +1602,58 @@ void ExternalSearchManager::on(TimerManagerListener::Second, uint64_t tick) noex
  		{
  			if (tick >= i->expires)
  			{
@@ -920,7 +918,7 @@ index bc5c165fe..00bda5d09 100644
  			{
  				cancelIds.push_back(i->first);
  				i = pending.erase(i);
-@@ -944,8 +1671,19 @@ void ExternalSearchManager::cancelSearch(uint64_t ownerId) noexcept
+@@ -944,8 +1669,19 @@ void ExternalSearchManager::cancelSearch(uint64_t ownerId) noexcept
  			}
  			else ++i;
  		}
@@ -940,7 +938,7 @@ index bc5c165fe..00bda5d09 100644
  }
  
  bool ExternalSearchManager::enqueueDownload(const ExternalSearch::Result& result, const string& destination) noexcept
-@@ -954,6 +1692,8 @@ bool ExternalSearchManager::enqueueDownload(const ExternalSearch::Result& result
+@@ -954,6 +1690,8 @@ bool ExternalSearchManager::enqueueDownload(const ExternalSearch::Result& result
  		return enqueueSoulseek(result, destination);
  	if (result.network == ExternalSearch::NETWORK_BITTORRENT)
  		return enqueueQbittorrent(result, destination);
@@ -949,7 +947,7 @@ index bc5c165fe..00bda5d09 100644
  	return false;
  }
  
-@@ -1048,14 +1788,32 @@ void ExternalSearchManager::cleanupRequest(uint64_t requestId) noexcept
+@@ -1048,14 +1786,32 @@ void ExternalSearchManager::cleanupRequest(uint64_t requestId) noexcept
  void ExternalSearchManager::shutdown() noexcept
  {
  	std::vector<uint64_t> requests;

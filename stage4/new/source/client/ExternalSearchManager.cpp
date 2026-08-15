@@ -190,9 +190,7 @@ namespace
 		void emit(const string& name, const string& backendId) noexcept
 		{
 			if (name.empty() || item.hash.empty() || results.size() >= static_cast<size_t>(resultLimit)) return;
-			const string key = item.hash + "
-" + Util::toString(item.size) + "
-" + (backendId.empty() ? string("parent") : backendId);
+			const string key = item.hash + "\n" + Util::toString(item.size) + "\n" + (backendId.empty() ? string("parent") : backendId);
 			if (!seen.insert(key).second) return;
 			ExternalSearch::Result r;
 			r.ownerId = ownerId;
