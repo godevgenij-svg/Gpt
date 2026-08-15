@@ -59,6 +59,13 @@ jobs:
           & $patchExe -p2 -d blacklink -i "$PWD\patches\GreyLink_Stage2_compilefix1.patch" --batch --forward
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Apply Russian runtime localization
+        shell: pwsh
+        run: |
+          $patchExe = "C:\Program Files\Git\usr\bin\patch.exe"
+          & $patchExe -p1 -d blacklink -i "$PWD\patches\GreyLink_RU_runtimefix.patch" --batch --forward
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Sanitize and validate StringDefs for MakeDefs
         shell: pwsh
         run: |
@@ -89,7 +96,6 @@ jobs:
           if (-not (Test-Path $vswhere)) { throw "vswhere.exe not found" }
           $vsPath = (& $vswhere -latest -products * -property installationPath).Trim()
           if (-not $vsPath) { throw "Visual Studio installation not found" }
-
           $toolRoot = Get-ChildItem "$vsPath\VC\Tools\MSVC" -Directory -ErrorAction Stop |
             Sort-Object Name -Descending |
             Where-Object {
@@ -98,7 +104,6 @@ jobs:
             } |
             Select-Object -First 1
           if (-not $toolRoot) { throw "Preinstalled v143 compiler/ATL pair not found" }
-
           $sdkRoot = "${env:ProgramFiles(x86)}\Windows Kits\10"
           $windowsH = Join-Path $sdkRoot 'Include\10.0.19041.0\um\Windows.h'
           $rc = Join-Path $sdkRoot 'bin\10.0.19041.0\x64\rc.exe'
@@ -106,7 +111,6 @@ jobs:
           $cl = Join-Path $toolRoot.FullName 'bin\Hostx64\x64\cl.exe'
           $atl = Join-Path $toolRoot.FullName 'atlmfc\include\atlbase.h'
           $msbuild = Get-Command msbuild -ErrorAction SilentlyContinue
-
           if (-not $msbuild) { throw "MSBuild missing" }
           foreach ($required in @($cl, $atl, $windowsH, $rc, $mt)) {
             if (-not (Test-Path $required)) { throw "Required build file missing: $required" }
@@ -114,7 +118,6 @@ jobs:
           Write-Host "MSBuild: $($msbuild.Source)"
           Write-Host "MSVC/ATL root: $($toolRoot.FullName)"
           Write-Host "Windows SDK: 10.0.19041.0"
-          Write-Host "No Visual Studio installation step is used."
 
       - name: Build Release x64 with watchdog
         timeout-minutes: 20
@@ -134,7 +137,6 @@ jobs:
             '/fl',
             "/flp:logfile=$log;verbosity=diagnostic"
           )
-          Write-Host "Starting MSBuild with v143 override and 4-minute no-progress watchdog"
           $p = Start-Process -FilePath $msbuild -ArgumentList $args -PassThru -NoNewWindow
           $lastProgress = Get-Date
           $lastLength = -1L
@@ -150,7 +152,6 @@ jobs:
               }
             }
             if (((Get-Date) - $lastProgress).TotalSeconds -ge 240) {
-              Write-Host "MSBuild log has not changed for 240 seconds. Killing process tree."
               cmd /c "taskkill /PID $($p.Id) /T /F" | Out-Host
               throw "MSBuild watchdog: no progress for 4 minutes"
             }
