@@ -1,0 +1,105 @@
+name: Stage 5 source snapshot
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ stage5-shareaza ]
+    paths:
+      - '.github/workflows/stage5-source.yml'
+      - 'patches/**'
+      - 'runtime/**'
+
+jobs:
+  snapshot:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout CI files
+        uses: actions/checkout@v4
+
+      - name: Reconstruct Stage 2 base patch
+        shell: pwsh
+        run: |
+          $parts = Get-ChildItem 'patches\ci2.part*' | Sort-Object Name
+          if ($parts.Count -ne 8) { throw "Expected 8 Stage 2 chunks, found $($parts.Count)" }
+          $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+          [IO.File]::WriteAllBytes("$PWD\Stage2.patch.xz", [Convert]::FromBase64String($b64))
+          if ((Get-FileHash "$PWD\Stage2.patch.xz" -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'ff95c6073cde34ff3af0e082c06e5131273f4544a9ee81686d7420d9aba7f05b') { throw 'Stage 2 XZ hash mismatch' }
+          cmd /c "7z x Stage2.patch.xz -so > Stage2.patch"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ((Get-FileHash "$PWD\Stage2.patch" -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'c120d913ac679d4b494d6ac7877b50c1e96beb431dac5bbc4912cf617ab31999') { throw 'Stage 2 patch hash mismatch' }
+
+      - name: Clone pinned BlackLink upstream
+        shell: pwsh
+        run: |
+          git clone https://github.com/zipper9/blacklink.git blacklink
+          git -C blacklink checkout 1a72cfddca154da9070caca1b5a02df56d5498ab
+          if ((git -C blacklink rev-parse HEAD).Trim() -ne '1a72cfddca154da9070caca1b5a02df56d5498ab') { throw 'Wrong upstream commit' }
+
+      - name: Apply Stage 2 chain
+        shell: pwsh
+        run: |
+          $patchExe = 'C:\Program Files\Git\usr\bin\patch.exe'
+          & $patchExe -p2 -d blacklink -i "$PWD\Stage2.patch" --batch --forward
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C blacklink apply ../patches/GreyLink_Stage2_MakeDefs_hotfix.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $patchExe -p2 -d blacklink -i "$PWD\patches\GreyLink_Stage2_compilefix1.patch" --batch --forward
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $patchExe -p1 -d blacklink -i "$PWD\patches\GreyLink_RU_runtimefix.patch" --batch --forward
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $path = 'blacklink\client\StringDefs.h'
+          $text = Get-Content $path -Raw
+          $text = $text -replace '(?m)^[ \t]*// Additional UI strings localized by the Russian localization patch\r?\n', ''
+          $text = $text -replace '(?m)^[ \t]*// GreyBridge multi-network UI\r?\n', ''
+          [IO.File]::WriteAllText((Resolve-Path $path), $text, [Text.UTF8Encoding]::new($false))
+
+      - name: Reconstruct and apply Stage 3
+        shell: pwsh
+        run: |
+          $parts = Get-ChildItem 'patches\stage3.part*' | Sort-Object Name
+          if ($parts.Count -ne 4) { throw "Expected 4 Stage 3 chunks, found $($parts.Count)" }
+          $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+          [IO.File]::WriteAllBytes("$PWD\Stage3.patch.xz", [Convert]::FromBase64String($b64))
+          if ((Get-FileHash "$PWD\Stage3.patch.xz" -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'ed453da31122b6cec97566b119ff119c25cf34f9d3cc4b7b7cfd94b40926f8ff') { throw 'Stage 3 XZ hash mismatch' }
+          cmd /c "7z x Stage3.patch.xz -so > Stage3.patch"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ((Get-FileHash "$PWD\Stage3.patch" -Algorithm SHA256).Hash.ToLowerInvariant() -ne '54eb0e38f49c355f48c4c0894dbd527bc5aa446295b8ea681aa233c52cabc58c') { throw 'Stage 3 patch hash mismatch' }
+          git -C blacklink apply ../Stage3.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Reconstruct and apply Stage 4
+        shell: pwsh
+        run: |
+          $b64 = Get-Content 'patches\stage4.b64' -Raw
+          [IO.File]::WriteAllBytes("$PWD\Stage4.patch.xz", [Convert]::FromBase64String($b64))
+          if ((Get-FileHash "$PWD\Stage4.patch.xz" -Algorithm SHA256).Hash.ToLowerInvariant() -ne '436973d902c0b40df908de961eb829f86fca86b6e436febc013b4a32b3bc6815') { throw 'Stage 4 XZ hash mismatch' }
+          cmd /c "7z x Stage4.patch.xz -so > Stage4.patch"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ((Get-FileHash "$PWD\Stage4.patch" -Algorithm SHA256).Hash.ToLowerInvariant() -ne '1828691e8cd7407b915f1dcd5ae7d54a3243787eddce36610b65851098e4b063') { throw 'Stage 4 patch hash mismatch' }
+          git -C blacklink apply ../Stage4.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C blacklink diff --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Collect Stage 4 source snapshot
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force snapshot\client,snapshot\windows,snapshot\compiled\Settings | Out-Null
+          Copy-Item blacklink\client\GreyBridge* snapshot\client\ -ErrorAction SilentlyContinue
+          Copy-Item blacklink\client\ExternalSearch* snapshot\client\ -ErrorAction SilentlyContinue
+          Copy-Item blacklink\windows\GreyBridge* snapshot\windows\ -ErrorAction SilentlyContinue
+          Copy-Item blacklink\windows\ExternalSearch* snapshot\windows\ -ErrorAction SilentlyContinue
+          Copy-Item blacklink\windows\SearchFrm.* snapshot\windows\ -ErrorAction SilentlyContinue
+          Copy-Item blacklink\client\HttpClient.* snapshot\client\ -ErrorAction SilentlyContinue
+          Copy-Item blacklink\compiled\Settings\ExternalSearch.xml snapshot\compiled\Settings\ -ErrorAction SilentlyContinue
+          Copy-Item blacklink\client\client.vcxproj snapshot\client\ -ErrorAction SilentlyContinue
+          Copy-Item blacklink\windows\windows.vcxproj snapshot\windows\ -ErrorAction SilentlyContinue
+          Get-ChildItem snapshot -Recurse | Select-Object FullName,Length | Format-Table
+
+      - name: Upload Stage 4 source snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: Stage4-external-search-source
+          path: snapshot
+          if-no-files-found: error
+          retention-days: 7
