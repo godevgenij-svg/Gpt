@@ -1,0 +1,118 @@
+--- a/client/ConfCore.cpp
++++ b/client/ConfCore.cpp
+@@ -13,7 +13,7 @@
+ #include "Base32.h"
+ #include "CID.h"
+ 
+-static const string DEFAULT_LANG_FILE = "en-US.xml";
++static const string DEFAULT_LANG_FILE = "ru-RU.xml";
+ 
+ static const char URL_GET_IP_DEFAULT[]  = "http://checkip.dyndns.com";
+ static const char URL_GET_IP6_DEFAULT[] = "http://checkipv6.dynu.com";
+--- a/windows/PropPage.cpp
++++ b/windows/PropPage.cpp
+@@ -304,7 +304,7 @@
+ 
+ #ifdef _DEBUG
+ 	if (showWarning)
+-		MessageBox(page, _T("Values of the changed settings are automatically adjusted"), CTSTRING(WARNING), MB_OK);
++		MessageBox(page, CTSTRING(UI_SETTINGS_CHANGED_ADJUSTED), CTSTRING(WARNING), MB_OK);
+ #endif
+ }
+ 
+--- a/windows/DirectoryListingFrm.cpp
++++ b/windows/DirectoryListingFrm.cpp
+@@ -1287,8 +1287,8 @@
+ LRESULT DirectoryListingFrame::onDownloadAny(WORD, WORD, HWND, BOOL&)
+ {
+ 	LineDlg dlg;
+-	dlg.title = _T("Download file by name");
+-	dlg.description = _T("Enter full path (ADC style)");
++	dlg.title = CTSTRING(DOWNLOAD_FILE_BY_NAME);
++	dlg.description = CTSTRING(ENTER_FULL_ADC_PATH);
+ 	dlg.allowEmpty = false;
+ 	dlg.icon = IconBitmaps::DOWNLOAD;
+ 	if (dlg.DoModal() != IDOK) return 0;
+@@ -1639,7 +1639,7 @@
+ 			fileMenu.AppendMenu(MF_STRING, IDC_DOWNLOAD_WITH_PRIO + DEFAULT_PRIO, CTSTRING(DOWNLOAD), g_iconBitmaps.getBitmap(IconBitmaps::DOWNLOAD, 0));
+ #ifdef DEBUG_TRANSFERS
+ 			if (selCount == 1)
+-				fileMenu.AppendMenu(MF_STRING, IDC_DOWNLOAD_BY_PATH, _T("Download by path"));
++				fileMenu.AppendMenu(MF_STRING, IDC_DOWNLOAD_BY_PATH, CTSTRING(DOWNLOAD_BY_PATH));
+ #endif
+ 		}
+ 		if (showingDupFiles && selCount == 1 && ii->type == ItemInfo::FILE && ii->file->isAnySet(DirectoryListing::FLAG_FOUND))
+@@ -1847,7 +1847,7 @@
+ 			directoryMenu.AppendMenu(MF_POPUP, targetDirMenu, CTSTRING(DOWNLOAD_TO));
+ 			directoryMenu.AppendMenu(MF_POPUP, priorityDirMenu, CTSTRING(DOWNLOAD_WITH_PRIORITY));
+ #ifdef DEBUG_TRANSFERS
+-			directoryMenu.AppendMenu(MF_STRING, IDC_DOWNLOAD_ANY, _T("Download file by name..."));
++			directoryMenu.AppendMenu(MF_STRING, IDC_DOWNLOAD_ANY, CTSTRING(DOWNLOAD_FILE_BY_NAME_DOTS));
+ #endif
+ 
+ 			appendFavTargets(targetDirMenu, IDC_DOWNLOADDIR_TO_FAV);
+--- a/windows/CDMDebugFrame.cpp
++++ b/windows/CDMDebugFrame.cpp
+@@ -32,10 +32,10 @@
+ 
+ 	ctrlDirection.Create(ctrlStatus.m_hWnd, rcDefault, NULL, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_HSCROLL | CBS_DROPDOWNLIST, WS_EX_CLIENTEDGE);
+ 	ctrlDirection.SetFont(Fonts::g_systemFont);
+-	ctrlDirection.AddString(_T("Both"));
+-	ctrlDirection.AddString(_T("Outgoing"));
+-	ctrlDirection.AddString(_T("Incoming"));
+-	ctrlDirection.AddString(_T("None"));
++	ctrlDirection.AddString(CTSTRING(DIRECTION_BOTH));
++	ctrlDirection.AddString(CTSTRING(DIRECTION_OUTGOING));
++	ctrlDirection.AddString(CTSTRING(DIRECTION_INCOMING));
++	ctrlDirection.AddString(CTSTRING(NONE));
+ 	ctrlDirection.SetCurSel(0);
+ 	
+ 	DBRegistryMap values;
+@@ -198,12 +198,12 @@
+ 			if (!filterInclude.empty())
+ 			{
+ 				if (!msg.empty()) msg += _T(", ");
+-				msg += _T("Include ") + Text::toT(filterInclude);
++				msg += TSTRING(FILTER_INCLUDE) + _T(" ") + Text::toT(filterInclude);
+ 			}
+ 			if (!filterExclude.empty())
+ 			{
+ 				if (!msg.empty()) msg += _T(", ");
+-				msg += _T("Exclude ") + Text::toT(filterExclude);
++				msg += TSTRING(FILTER_EXCLUDE) + _T(" ") + Text::toT(filterExclude);
+ 			}
+ 		}
+ 		else
+--- a/windows/MainFrm.cpp
++++ b/windows/MainFrm.cpp
+@@ -538,7 +538,7 @@
+ 	}
+ 
+ 	RECT rect = {0};
+-	ctrlHashProgress.Create(ctrlStatus, &rect, _T("Hashing"), WS_CHILD | PBS_SMOOTH, 0, IDC_STATUS_HASH_PROGRESS);
++	ctrlHashProgress.Create(ctrlStatus, &rect, CTSTRING(HASH_PROGRESS), WS_CHILD | PBS_SMOOTH, 0, IDC_STATUS_HASH_PROGRESS);
+ 	ctrlHashProgress.SetRange(0, HashProgressDlg::MAX_PROGRESS_VALUE);
+ 	ctrlHashProgress.SetStep(1);
+ 
+--- a/windows/ExtendedTrace.cpp
++++ b/windows/ExtendedTrace.cpp
+@@ -99,7 +99,7 @@
+ 
+ 			_sntprintf(&buf[0], buf.length(), crashMessage.c_str(), app.c_str());
+ 		
+-			MessageBox(NULL, buf.c_str(), _T("Unhandled exception"), MB_OK | MB_ICONERROR);
++			MessageBox(NULL, buf.c_str(), CTSTRING(UNHANDLED_EXCEPTION), MB_OK | MB_ICONERROR);
+ 			ExitProcess(1);
+ 		}
+ 	}
+--- a/windows/CrashHandler.cpp
++++ b/windows/CrashHandler.cpp
+@@ -111,7 +111,7 @@
+ 		m_nid.uFlags = NIF_INFO;
+ 		m_nid.uTimeout = 5000;
+ 		m_nid.dwInfoFlags = NIIF_WARNING;
+-		_tcscpy(m_nid.szInfo, _T("exceptioninfo.txt was generated"));
++		_tcscpy(m_nid.szInfo, CTSTRING(CRASH_INFO_GENERATED));
+ 		_tcscpy(m_nid.szInfoTitle, crashMessageTitle.c_str());
+ 		Shell_NotifyIcon(NIM_MODIFY, &m_nid);
+ 	}
