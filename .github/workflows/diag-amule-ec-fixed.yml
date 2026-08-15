@@ -1,0 +1,48 @@
+name: Verify fixed aMule EC API
+on:
+  push:
+    branches: [ backend-pack-ready ]
+    paths: [ '.github/workflows/diag-amule-ec-fixed.yml' ]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  diag:
+    runs-on: windows-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'
+          function WP($p,$s=40){$e=(Get-Date).AddSeconds($s);while((Get-Date)-lt$e){$c=New-Object Net.Sockets.TcpClient;try{$a=$c.BeginConnect('127.0.0.1',$p,$null,$null);if($a.AsyncWaitHandle.WaitOne(500)-and$c.Connected){$c.EndConnect($a);return $true}}catch{}finally{$c.Close()};Start-Sleep -Milliseconds 300};$false}
+          function MD5Hex($s){$md5=[Security.Cryptography.MD5]::Create();try{$b=[Text.Encoding]::UTF8.GetBytes($s);([BitConverter]::ToString($md5.ComputeHash($b))).Replace('-','').ToLowerInvariant()}finally{$md5.Dispose()}}
+          $t=Join-Path $env:RUNNER_TEMP ('amfix-'+[guid]::NewGuid().ToString('N'));New-Item -ItemType Directory $t -Force|Out-Null
+          try {
+            $z=Join-Path $t a.zip;&curl.exe -fL 'https://nightly.link/amule-org/amule/actions/artifacts/9246296823.zip' -o $z;$o=Join-Path $t o;Expand-Archive $z $o -Force;$inner=Get-ChildItem $o -Recurse -File -Filter '*Windows-x64*.zip'|Select-Object -First 1;$a=Join-Path $t a;Expand-Archive $inner.FullName $a -Force;$bin=(Get-ChildItem $a -Recurse -File -Filter amuleapi.exe|Select-Object -First 1).Directory.FullName
+            $api=(Join-Path $bin amuleapi.exe);$apiCfg=$api.Replace('\','/');$c=Join-Path $t cfg;New-Item -ItemType Directory $c -Force|Out-Null;$ecPlain='diag_ec_password';$ecHash=MD5Hex $ecPlain
+            @"
+          [AmuleApi]
+          Enabled=1
+          BindAddress=127.0.0.1
+          HttpPort=4713
+          Path=$apiCfg
+
+          [eMule]
+          FirstRunWizardDone=1
+
+          [ExternalConnect]
+          AcceptExternalConnections=1
+          RequireEncryption=0
+          ECAddress=127.0.0.1
+          ECPort=4712
+          ECPassword=$ecHash
+          "@|Set-Content (Join-Path $c amule.conf) -Encoding UTF8
+            &$api "--config-dir=$c" '--set-admin-pass=diagpassword';if($LASTEXITCODE){throw 'set api password failed'}
+            $p=Start-Process (Join-Path $bin amuled.exe) -ArgumentList @("--config-dir=$c") -RedirectStandardOutput (Join-Path $c stdout.txt) -RedirectStandardError (Join-Path $c stderr.txt) -PassThru
+            if(-not(WP 4713 45)){Start-Sleep 1;if(Test-Path(Join-Path$c logfile)){Get-Content(Join-Path$c logfile)-Tail 200|Out-Host};throw 'aMule REST port 4713 did not open'}
+            $v=Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:4713/api/v0/version' -TimeoutSec 10;Write-Host "VERSION=$($v.StatusCode) $($v.Content)"
+            $body=@{password='diagpassword'}|ConvertTo-Json -Compress;$login=Invoke-RestMethod 'http://127.0.0.1:4713/api/v0/auth/login?type=bearer' -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 10
+            Write-Host "ROLE=$($login.role) TOKEN=$([bool]$login.token)"
+            if(-not$login.token-or([string]$login.role).ToLowerInvariant()-ne'admin'){throw 'admin login failed'}
+          } finally {Get-Process -ErrorAction SilentlyContinue|Where-Object{$_.ProcessName-match'amule'}|Stop-Process -Force -ErrorAction SilentlyContinue}
