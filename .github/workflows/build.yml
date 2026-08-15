@@ -178,6 +178,18 @@ jobs:
           if ($nodes | Where-Object { $_.Name -eq 'GreyBridgeSettings' }) { throw "Legacy GreyBridgeSettings localization is still present" }
           Write-Host "Russian localization OK: 2021/2021 unique, revision 5-sharp"
 
+      - name: Make REPORT_FOR_CHATGPT Windows PowerShell 5.1 compatible
+        shell: pwsh
+        run: |
+          $report = (Resolve-Path 'blacklink\compiled\REPORT_FOR_CHATGPT.ps1')
+          $text = [IO.File]::ReadAllText($report, [Text.Encoding]::UTF8)
+          [IO.File]::WriteAllText($report, $text, [Text.UTF8Encoding]::new($true))
+          $bytes = [IO.File]::ReadAllBytes($report)
+          if ($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or $bytes[1] -ne 0xBB -or $bytes[2] -ne 0xBF) {
+            throw 'REPORT_FOR_CHATGPT.ps1 UTF-8 BOM was not written'
+          }
+          Write-Host 'REPORT_FOR_CHATGPT.ps1 rewritten as UTF-8 BOM for Windows PowerShell 5.1'
+
       - name: Validate REPORT_FOR_CHATGPT PowerShell syntax
         shell: pwsh
         run: |
@@ -186,9 +198,11 @@ jobs:
           $errors = $null
           [System.Management.Automation.Language.Parser]::ParseFile($report, [ref]$tokens, [ref]$errors) | Out-Null
           if ($errors.Count -gt 0) {
-            throw ("REPORT_FOR_CHATGPT.ps1 syntax errors:`n" + (($errors | ForEach-Object { $_.Message }) -join "`n"))
+            throw ("REPORT_FOR_CHATGPT.ps1 syntax errors in pwsh:`n" + (($errors | ForEach-Object { $_.Message }) -join "`n"))
           }
-          Write-Host 'REPORT_FOR_CHATGPT.ps1 syntax OK'
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; [void][ScriptBlock]::Create([IO.File]::ReadAllText((Resolve-Path 'blacklink\compiled\REPORT_FOR_CHATGPT.ps1')))"
+          if ($LASTEXITCODE -ne 0) { throw "REPORT_FOR_CHATGPT.ps1 failed Windows PowerShell 5.1 parse check with exit code $LASTEXITCODE" }
+          Write-Host 'REPORT_FOR_CHATGPT.ps1 syntax OK in pwsh and Windows PowerShell 5.1'
 
       - name: Validate ExternalSearch runtime defaults
         shell: pwsh
