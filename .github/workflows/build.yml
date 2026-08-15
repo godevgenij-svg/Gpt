@@ -178,6 +178,16 @@ jobs:
           if ($nodes | Where-Object { $_.Name -eq 'GreyBridgeSettings' }) { throw "Legacy GreyBridgeSettings localization is still present" }
           Write-Host "Russian localization OK: 2021/2021 unique, revision 5-sharp"
 
+      - name: Install maintainable REPORT_FOR_CHATGPT v2
+        shell: pwsh
+        run: |
+          $src = (Resolve-Path 'runtime\REPORT_FOR_CHATGPT.ps1')
+          $dst = 'blacklink\compiled\REPORT_FOR_CHATGPT.ps1'
+          Copy-Item -LiteralPath $src -Destination $dst -Force
+          $installed = [IO.File]::ReadAllText((Resolve-Path $dst), [Text.Encoding]::UTF8)
+          if ($installed -notmatch 'GreyLink diagnostic v2') { throw 'REPORT_FOR_CHATGPT v2 marker missing after install' }
+          Write-Host 'REPORT_FOR_CHATGPT v2 installed into runtime package'
+
       - name: Make REPORT_FOR_CHATGPT Windows PowerShell 5.1 compatible
         shell: pwsh
         run: |
@@ -311,6 +321,8 @@ jobs:
           foreach ($file in $required) {
             if (-not (Test-Path $file)) { throw "Required runtime file missing: $file" }
           }
+          $reportText = [IO.File]::ReadAllText((Resolve-Path 'blacklink\compiled\REPORT_FOR_CHATGPT.ps1'), [Text.Encoding]::UTF8)
+          if ($reportText -notmatch 'GreyLink diagnostic v2') { throw 'Packaged report script is not diagnostic v2' }
           if (Test-Path 'blacklink\compiled\Settings\GreyBridge.xml') { throw 'Legacy GreyBridge.xml should not be packaged' }
           Get-Item $required | Format-Table Name,Length,LastWriteTime
 
