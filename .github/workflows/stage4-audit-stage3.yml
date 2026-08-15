@@ -1,0 +1,121 @@
+name: Stage 4 audit exact Stage 3 source
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ stage4-ed2k-from-stage3 ]
+    paths:
+      - '.github/workflows/stage4-audit-stage3.yml'
+
+jobs:
+  audit:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout patch repository
+        uses: actions/checkout@v4
+
+      - name: Reconstruct Stage 2 base patch
+        shell: pwsh
+        run: |
+          $parts = Get-ChildItem "patches\ci2.part*" | Sort-Object Name
+          if ($parts.Count -ne 8) { throw "Expected 8 Stage 2 chunks, found $($parts.Count)" }
+          $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+          if ($b64.Length -ne 30604) { throw "Unexpected Stage 2 base64 length: $($b64.Length)" }
+          [IO.File]::WriteAllBytes("$PWD\Stage2.patch.xz", [Convert]::FromBase64String($b64))
+          $xzHash = (Get-FileHash "$PWD\Stage2.patch.xz" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($xzHash -ne 'ff95c6073cde34ff3af0e082c06e5131273f4544a9ee81686d7420d9aba7f05b') { throw "Stage 2 XZ SHA256 mismatch: $xzHash" }
+          cmd /c "7z x Stage2.patch.xz -so > Stage2.patch"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $patchHash = (Get-FileHash "$PWD\Stage2.patch" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($patchHash -ne 'c120d913ac679d4b494d6ac7877b50c1e96beb431dac5bbc4912cf617ab31999') { throw "Stage 2 patch SHA256 mismatch: $patchHash" }
+
+      - name: Clone pinned BlackLink
+        shell: pwsh
+        run: |
+          git clone https://github.com/zipper9/blacklink.git blacklink
+          git -C blacklink checkout 1a72cfddca154da9070caca1b5a02df56d5498ab
+          if ((git -C blacklink rev-parse HEAD).Trim() -ne '1a72cfddca154da9070caca1b5a02df56d5498ab') { throw 'Wrong upstream revision' }
+
+      - name: Apply Stage 2 and runtime fixes
+        shell: pwsh
+        run: |
+          $patchExe = "C:\Program Files\Git\usr\bin\patch.exe"
+          & $patchExe -p2 -d blacklink -i "$PWD\Stage2.patch" --batch --forward
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C blacklink apply --check ../patches/GreyLink_Stage2_MakeDefs_hotfix.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C blacklink apply ../patches/GreyLink_Stage2_MakeDefs_hotfix.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $patchExe -p2 -d blacklink -i "$PWD\patches\GreyLink_Stage2_compilefix1.patch" --batch --forward
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $patchExe -p1 -d blacklink -i "$PWD\patches\GreyLink_RU_runtimefix.patch" --batch --forward
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Sanitize StringDefs
+        shell: pwsh
+        run: |
+          $path = "blacklink\client\StringDefs.h"
+          $text = Get-Content $path -Raw
+          $text = $text -replace '(?m)^[ \t]*// Additional UI strings localized by the Russian localization patch\r?\n', ''
+          $text = $text -replace '(?m)^[ \t]*// GreyBridge multi-network UI\r?\n', ''
+          [IO.File]::WriteAllText((Resolve-Path $path), $text, [Text.UTF8Encoding]::new($false))
+
+      - name: Reconstruct and apply Stage 3
+        shell: pwsh
+        run: |
+          $parts = Get-ChildItem "patches\stage3.part*" | Sort-Object Name
+          if ($parts.Count -ne 4) { throw "Expected 4 Stage 3 chunks, found $($parts.Count)" }
+          $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+          if ($b64.Length -ne 24024) { throw "Unexpected Stage 3 base64 length: $($b64.Length)" }
+          [IO.File]::WriteAllBytes("$PWD\Stage3.patch.xz", [Convert]::FromBase64String($b64))
+          $xzHash = (Get-FileHash "$PWD\Stage3.patch.xz" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($xzHash -ne 'ed453da31122b6cec97566b119ff119c25cf34f9d3cc4b7b7cfd94b40926f8ff') { throw "Stage 3 XZ SHA256 mismatch: $xzHash" }
+          cmd /c "7z x Stage3.patch.xz -so > Stage3.patch"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $patchHash = (Get-FileHash "$PWD\Stage3.patch" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($patchHash -ne '54eb0e38f49c355f48c4c0894dbd527bc5aa446295b8ea681aa233c52cabc58c') { throw "Stage 3 patch SHA256 mismatch: $patchHash" }
+          git -C blacklink apply --check ../Stage3.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C blacklink apply ../Stage3.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C blacklink diff --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Print exact Stage 3 provider sources
+        shell: pwsh
+        run: |
+          $files = @(
+            'client/ExternalSearchManager.h',
+            'client/ExternalSearchManager.cpp',
+            'client/ExternalSearchResult.h',
+            'windows/ExternalSearchSettingsDlg.h',
+            'windows/ExternalSearchSettingsDlg.cpp',
+            'compiled/Settings/ExternalSearch.xml'
+          )
+          foreach ($rel in $files) {
+            $path = Join-Path 'blacklink' $rel
+            if (-not (Test-Path $path)) { throw "Missing expected Stage 3 file: $rel" }
+            Write-Host "===== BEGIN $rel ====="
+            $n = 0
+            Get-Content $path | ForEach-Object { $n++; Write-Host (("{0:D5}:" -f $n) + $_) }
+            Write-Host "===== END $rel ====="
+          }
+
+      - name: Print SearchFrm external-search context
+        shell: pwsh
+        run: |
+          $path = 'blacklink/windows/SearchFrm.cpp'
+          $lines = Get-Content $path
+          $hits = Select-String -Path $path -Pattern 'ExternalSearch|externalResult|externalSearch' -AllMatches
+          $ranges = @()
+          foreach ($h in $hits) {
+            $from = [Math]::Max(1, $h.LineNumber - 12)
+            $to = [Math]::Min($lines.Count, $h.LineNumber + 20)
+            $ranges += ,@($from,$to)
+          }
+          Write-Host '===== BEGIN windows/SearchFrm.cpp external context ====='
+          foreach ($r in $ranges) {
+            Write-Host ("--- lines {0}-{1} ---" -f $r[0],$r[1])
+            for ($i=$r[0]; $i -le $r[1]; $i++) { Write-Host (("{0:D05}:" -f $i) + $lines[$i-1]) }
+          }
+          Write-Host '===== END windows/SearchFrm.cpp external context ====='
