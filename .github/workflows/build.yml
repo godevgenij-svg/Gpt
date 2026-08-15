@@ -70,7 +70,7 @@ jobs:
           & $patchExe -p1 -d blacklink -i "$PWD\patches\GreyLink_RU_runtimefix.patch" --batch --forward
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Sanitize and validate StringDefs for MakeDefs
+      - name: Sanitize StringDefs before feature patches
         shell: pwsh
         run: |
           $path = "blacklink\client\StringDefs.h"
@@ -78,15 +78,6 @@ jobs:
           $text = $text -replace '(?m)^[ \t]*// Additional UI strings localized by the Russian localization patch\r?\n', ''
           $text = $text -replace '(?m)^[ \t]*// GreyBridge multi-network UI\r?\n', ''
           [IO.File]::WriteAllText((Resolve-Path $path), $text, [Text.UTF8Encoding]::new($false))
-          $lines = Get-Content $path
-          $bad = @()
-          for ($i = 0; $i -lt $lines.Count; $i++) {
-            $line = $lines[$i]
-            if ($line.Length -lt 5) { continue }
-            if ($line.Contains('// @Strings: ') -or $line.Contains('// @Names: ') -or $line.Contains('// @DontAdd') -or $line.Contains('// @Prolog: ')) { continue }
-            if (-not $line.Contains(',')) { $bad += "line $($i + 1): $line" }
-          }
-          if ($bad.Count -gt 0) { throw ("Unsafe StringDefs lines for MakeDefs:`n" + ($bad -join "`n")) }
 
       - name: Reconstruct verify and apply Stage 3 external search patch
         shell: pwsh
@@ -109,6 +100,39 @@ jobs:
           git -C blacklink diff --check
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Reconstruct verify and apply Stage 4 aMule and report patch
+        shell: pwsh
+        run: |
+          $b64 = Get-Content "patches\stage4.b64" -Raw
+          if ($b64.Length -ne 16592) { throw "Unexpected Stage 4 base64 length: $($b64.Length)" }
+          [IO.File]::WriteAllBytes("$PWD\Stage4.patch.xz", [Convert]::FromBase64String($b64))
+          $xzHash = (Get-FileHash "$PWD\Stage4.patch.xz" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($xzHash -ne '436973d902c0b40df908de961eb829f86fca86b6e436febc013b4a32b3bc6815') { throw "Stage 4 XZ SHA256 mismatch: $xzHash" }
+          cmd /c "7z x Stage4.patch.xz -so > Stage4.patch"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $patchHash = (Get-FileHash "$PWD\Stage4.patch" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($patchHash -ne '1828691e8cd7407b915f1dcd5ae7d54a3243787eddce36610b65851098e4b063') { throw "Stage 4 patch SHA256 mismatch: $patchHash" }
+          git -C blacklink apply --check ../Stage4.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C blacklink apply ../Stage4.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C blacklink diff --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Final StringDefs safety validation
+        shell: pwsh
+        run: |
+          $path = "blacklink\client\StringDefs.h"
+          $lines = Get-Content $path
+          $bad = @()
+          for ($i = 0; $i -lt $lines.Count; $i++) {
+            $line = $lines[$i]
+            if ($line.Length -lt 5) { continue }
+            if ($line.Contains('// @Strings: ') -or $line.Contains('// @Names: ') -or $line.Contains('// @DontAdd') -or $line.Contains('// @Prolog: ')) { continue }
+            if (-not $line.Contains(',')) { $bad += "line $($i + 1): $line" }
+          }
+          if ($bad.Count -gt 0) { throw ("Unsafe StringDefs lines for MakeDefs:`n" + ($bad -join "`n")) }
+
       - name: Install and validate complete sharp Russian localization
         shell: pwsh
         run: |
@@ -122,17 +146,59 @@ jobs:
           New-Item -ItemType Directory -Force "blacklink\compiled\Lang" | Out-Null
           cmd /c "7z x ru-RU.xml.xz -so > blacklink\compiled\Lang\ru-RU.xml"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $xmlHash = (Get-FileHash "blacklink\compiled\Lang\ru-RU.xml" -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($xmlHash -ne '46a333b6096be695b0f35d30cc99dfc028398739459705c5aad96123c2f5a6c8') { throw "Localization XML SHA256 mismatch: $xmlHash" }
-          [xml]$xml = Get-Content "blacklink\compiled\Lang\ru-RU.xml" -Raw -Encoding UTF8
+          $baseHash = (Get-FileHash "blacklink\compiled\Lang\ru-RU.xml" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($baseHash -ne '46a333b6096be695b0f35d30cc99dfc028398739459705c5aad96123c2f5a6c8') { throw "Base localization XML SHA256 mismatch: $baseHash" }
+
+          $langPath = (Resolve-Path "blacklink\compiled\Lang\ru-RU.xml")
+          $text = [IO.File]::ReadAllText($langPath, [Text.Encoding]::UTF8)
+          $text = $text.Replace('Revision="4-sharp"', 'Revision="5-sharp"')
+          $marker = "`t</Strings>`n</Language>"
+          if (-not $text.Contains($marker)) { throw 'Localization closing marker not found' }
+          $insert = @(
+            "`t`t<String Name=`"ExternalSearchAmule`">eD2k / Kad (aMule)</String>",
+            "`t`t<String Name=`"ExternalSearchSearchMode`">Режим поиска</String>",
+            "`t`t<String Name=`"ExternalSearchAmuleUrlRequired`">aMule включён, но URL amuleapi не задан.</String>",
+            "`t`t<String Name=`"ExternalSearchAmulePasswordRequired`">aMule включён, но пароль администратора amuleapi не задан.</String>",
+            "`t`t<String Name=`"ExternalSearchAmuleInsecureUrl`">Удалённый amuleapi требует HTTPS. Обычный HTTP разрешён только для localhost.</String>"
+          ) -join "`n"
+          $text = $text.Replace($marker, $insert + "`n" + $marker)
+          [IO.File]::WriteAllText($langPath, $text, [Text.UTF8Encoding]::new($false))
+
+          $xmlHash = (Get-FileHash $langPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($xmlHash -ne '54939a9cdd42e4a8c4cb9fa379eb814a7303881e10ae13517bcd8717347a2d61') { throw "Stage 4 localization XML SHA256 mismatch: $xmlHash" }
+          [xml]$xml = Get-Content $langPath -Raw -Encoding UTF8
           $nodes = @($xml.Language.Strings.String)
-          if ($nodes.Count -ne 2016) { throw "Expected 2016 strings, got $($nodes.Count)" }
+          if ($nodes.Count -ne 2021) { throw "Expected 2021 strings, got $($nodes.Count)" }
           $unique = @($nodes | ForEach-Object { $_.Name } | Sort-Object -Unique)
-          if ($unique.Count -ne 2016) { throw "Expected 2016 unique string names, got $($unique.Count)" }
-          if ($xml.Language.Revision -ne '4-sharp') { throw "Unexpected localization revision: $($xml.Language.Revision)" }
-          if (-not ($nodes | Where-Object { $_.Name -eq 'ExternalSearchSources' })) { throw "ExternalSearchSources localization is missing" }
+          if ($unique.Count -ne 2021) { throw "Expected 2021 unique string names, got $($unique.Count)" }
+          if ($xml.Language.Revision -ne '5-sharp') { throw "Unexpected localization revision: $($xml.Language.Revision)" }
+          foreach ($name in @('ExternalSearchSources','ExternalSearchAmule','ExternalSearchSearchMode','ExternalSearchAmuleUrlRequired','ExternalSearchAmulePasswordRequired','ExternalSearchAmuleInsecureUrl')) {
+            if (-not ($nodes | Where-Object { $_.Name -eq $name })) { throw "Localization key missing: $name" }
+          }
           if ($nodes | Where-Object { $_.Name -eq 'GreyBridgeSettings' }) { throw "Legacy GreyBridgeSettings localization is still present" }
-          Write-Host "Russian localization OK: 2016/2016 unique, revision 4-sharp"
+          Write-Host "Russian localization OK: 2021/2021 unique, revision 5-sharp"
+
+      - name: Validate REPORT_FOR_CHATGPT PowerShell syntax
+        shell: pwsh
+        run: |
+          $report = (Resolve-Path 'blacklink\compiled\REPORT_FOR_CHATGPT.ps1')
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile($report, [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -gt 0) {
+            throw ("REPORT_FOR_CHATGPT.ps1 syntax errors:`n" + (($errors | ForEach-Object { $_.Message }) -join "`n"))
+          }
+          Write-Host 'REPORT_FOR_CHATGPT.ps1 syntax OK'
+
+      - name: Validate ExternalSearch runtime defaults
+        shell: pwsh
+        run: |
+          [xml]$cfg = Get-Content 'blacklink\compiled\Settings\ExternalSearch.xml' -Raw -Encoding UTF8
+          if ($cfg.ExternalSearch.Version -ne '3') { throw "Unexpected ExternalSearch config version: $($cfg.ExternalSearch.Version)" }
+          if (-not $cfg.ExternalSearch.Amule) { throw 'Amule section missing from ExternalSearch.xml' }
+          if ($cfg.ExternalSearch.Amule.BaseUrl -ne 'http://127.0.0.1:4713') { throw "Unexpected amuleapi default URL: $($cfg.ExternalSearch.Amule.BaseUrl)" }
+          if ($cfg.ExternalSearch.Amule.SearchType -ne 'global') { throw "Unexpected default aMule search mode: $($cfg.ExternalSearch.Amule.SearchType)" }
+          Write-Host 'ExternalSearch.xml Stage 4 defaults OK'
 
       - name: Setup MSBuild x64
         uses: microsoft/setup-msbuild@v2
@@ -224,7 +290,9 @@ jobs:
           $required = @(
             'blacklink\compiled\blacklink_x64.exe',
             'blacklink\compiled\Lang\ru-RU.xml',
-            'blacklink\compiled\Settings\ExternalSearch.xml'
+            'blacklink\compiled\Settings\ExternalSearch.xml',
+            'blacklink\compiled\REPORT_FOR_CHATGPT.cmd',
+            'blacklink\compiled\REPORT_FOR_CHATGPT.ps1'
           )
           foreach ($file in $required) {
             if (-not (Test-Path $file)) { throw "Required runtime file missing: $file" }
