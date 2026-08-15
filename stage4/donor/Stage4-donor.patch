@@ -1,0 +1,1424 @@
+diff --git a/client/ExternalSearchManager.cpp b/client/ExternalSearchManager.cpp
+index bc5c165..ff2bf8a 100644
+--- a/client/ExternalSearchManager.cpp
++++ b/client/ExternalSearchManager.cpp
+@@ -18,6 +18,7 @@ namespace
+ {
+ 	static const int EXTERNAL_SEARCH_MAX_HTTP_BODY = 16 * 1024 * 1024;
+ 	static const unsigned SLSKD_POLL_INTERVAL = 2000;
++	static const unsigned AMULE_POLL_INTERVAL = 2000;
+ 
+ 	static string remoteFileName(const string& path)
+ 	{
+@@ -43,6 +44,157 @@ namespace
+ 		}
+ 	};
+ 
++	class AmuleLoginParser : public JsonParser
++	{
++	public:
++		string token;
++		string role;
++	protected:
++		bool onNamedValue(const string& key, string& value, int type) noexcept override
++		{
++			if (getNestingLevel() != 1 || type != TYPE_STRING) return true;
++			const string k = Text::toLower(key);
++			if (k == "token") token = value;
++			else if (k == "role") role = Text::toLower(value);
++			return true;
++		}
++	};
++
++	class AmuleSearchStartParser : public JsonParser
++	{
++	public:
++		string id;
++	protected:
++		bool onNamedValue(const string& key, string& value, int type) noexcept override
++		{
++			if (getNestingLevel() == 1 && Text::toLower(key) == "search_id" && type == TYPE_INT)
++				id = value;
++			return true;
++		}
++	};
++
++	class AmuleResultsParser : public JsonParser
++	{
++	public:
++		AmuleResultsParser(uint64_t ownerId, const string& searchId, const string& searchKind,
++			std::vector<ExternalSearch::Result>& results, std::unordered_set<string>& seen) :
++			ownerId(ownerId), searchId(searchId), searchKind(searchKind), results(results), seen(seen),
++			inResults(false), inResult(false), inSources(false), inProgress(false)
++		{
++		}
++
++		string state;
++
++	protected:
++		bool onValue(string&, int type) noexcept override
++		{
++			if (type == TYPE_OBJECT && inResults && getNestingLevel() == 2)
++			{
++				item = Item();
++				inResult = true;
++			}
++			return true;
++		}
++
++		bool onNamedValue(const string& key, string& value, int type) noexcept override
++		{
++			const int level = getNestingLevel();
++			const string k = Text::toLower(key);
++			if (level == 1)
++			{
++				if (k == "results" && type == TYPE_ARRAY) inResults = true;
++				else if (k == "progress" && type == TYPE_OBJECT) inProgress = true;
++				return true;
++			}
++			if (inResult && level == 3)
++			{
++				if (k == "name" && type == TYPE_STRING) item.name = value;
++				else if (k == "hash" && type == TYPE_STRING) item.hash = Text::toLower(value);
++				else if (k == "size" && type == TYPE_INT) item.size = Util::toInt64(value);
++				else if (k == "sources" && type == TYPE_OBJECT) inSources = true;
++				return true;
++			}
++			if (inResult && inSources && level == 4 && type == TYPE_INT)
++			{
++				if (k == "total") item.sources = Util::toInt(value);
++				else if (k == "complete") item.completeSources = Util::toInt(value);
++				return true;
++			}
++			if (inProgress && level == 2)
++			{
++				if (k == "state" && type == TYPE_STRING) state = Text::toLower(value);
++			}
++			return true;
++		}
++
++		bool onEndStructure(int type) noexcept override
++		{
++			const int level = getNestingLevel();
++			if (type == TYPE_OBJECT && inResult && level == 4 && inSources)
++			{
++				inSources = false;
++			}
++			else if (type == TYPE_OBJECT && inResult && level == 3)
++			{
++				emit();
++				inResult = false;
++			}
++			else if (type == TYPE_ARRAY && inResults && level == 2)
++			{
++				inResults = false;
++			}
++			else if (type == TYPE_OBJECT && inProgress && level == 2)
++			{
++				inProgress = false;
++			}
++			return true;
++		}
++
++	private:
++		struct Item
++		{
++			Item() : size(0), sources(0), completeSources(0) {}
++			string name;
++			string hash;
++			int64_t size;
++			int sources;
++			int completeSources;
++		};
++
++		void emit() noexcept
++		{
++			if (item.name.empty() || item.hash.empty()) return;
++			const string key = item.hash + "\n" + Util::toString(item.size);
++			if (!seen.insert(key).second) return;
++			ExternalSearch::Result r;
++			r.ownerId = ownerId;
++			r.network = ExternalSearch::NETWORK_ED2K;
++			r.networkName = Text::toLower(searchKind) == "kad" ? "Kad" : "eD2k";
++			r.backendName = "aMule";
++			r.name = item.name;
++			r.path = item.name;
++			r.size = item.size;
++			r.source = "aMule";
++			r.hashType = "ED2K";
++			r.hash = item.hash;
++			r.searchId = searchId;
++			r.sourceCount = item.sources;
++			r.completeSourceCount = item.completeSources;
++			results.push_back(r);
++		}
++
++		uint64_t ownerId;
++		string searchId;
++		string searchKind;
++		std::vector<ExternalSearch::Result>& results;
++		std::unordered_set<string>& seen;
++		Item item;
++		bool inResults;
++		bool inResult;
++		bool inSources;
++		bool inProgress;
++	};
++
+ 	class SlskdResponsesParser : public JsonParser
+ 	{
+ 	public:
+@@ -227,6 +379,7 @@ string ExternalSearchManager::trimTrailingSlash(string s)
+ void ExternalSearchManager::reloadConfig() noexcept
+ {
+ 	SoulseekConfig newSoulseek;
++	AmuleConfig newAmule;
+ 	QbittorrentConfig newQbittorrent;
+ 	std::vector<TorznabSource> newTorznab;
+ 	const string newPath = configPath();
+@@ -252,6 +405,17 @@ void ExternalSearchManager::reloadConfig() noexcept
+ 				newSoulseek.responseLimit = std::max(1, xml.getIntChildAttrib("ResponseLimit", newSoulseek.responseLimit));
+ 			}
+ 			xml.resetCurrentChild();
++			if (xml.findChild("Amule"))
++			{
++				newAmule.enabled = xml.getBoolChildAttrib("Enabled");
++				newAmule.baseUrl = trimTrailingSlash(xml.getChildAttrib("BaseUrl", newAmule.baseUrl));
++				newAmule.password = xml.getChildAttrib("Password");
++				newAmule.searchType = Text::toLower(xml.getChildAttrib("SearchType", newAmule.searchType));
++				if (newAmule.searchType != "local" && newAmule.searchType != "global" && newAmule.searchType != "kad")
++					newAmule.searchType = "global";
++				newAmule.searchTimeout = std::max(10, xml.getIntChildAttrib("SearchTimeout", newAmule.searchTimeout));
++			}
++			xml.resetCurrentChild();
+ 			if (xml.findChild("QBittorrent"))
+ 			{
+ 				newQbittorrent.enabled = xml.getBoolChildAttrib("Enabled");
+@@ -290,28 +454,30 @@ void ExternalSearchManager::reloadConfig() noexcept
+ 	{
+ 		LOCK(cs);
+ 		soulseek = newSoulseek;
++		amule = newAmule;
+ 		qbittorrent = newQbittorrent;
+ 		torznab = newTorznab;
+ 		qbSessionCookie.clear();
++		amuleBearer.clear();
+ 	}
+ 
+ 	// One-time compatibility path: keep old settings working, but write the new
+-	// neutral file name/root so the project no longer depends on GreyLink-era naming.
++	// neutral file name/root so the current project no longer depends on the legacy naming.
+ 	if (useLegacy)
+ 	{
+ 		LogManager::message("External Search: migrating legacy GreyBridge.xml to ExternalSearch.xml", false);
+-		saveConfig(newSoulseek, newQbittorrent, newTorznab);
++		saveConfig(newSoulseek, newAmule, newQbittorrent, newTorznab);
+ 	}
+ }
+ 
+-bool ExternalSearchManager::saveConfig(const SoulseekConfig& newSoulseek, const QbittorrentConfig& newQbittorrent,
++bool ExternalSearchManager::saveConfig(const SoulseekConfig& newSoulseek, const AmuleConfig& newAmule, const QbittorrentConfig& newQbittorrent,
+ 	const std::vector<TorznabSource>& newTorznab) noexcept
+ {
+ 	try
+ 	{
+ 		SimpleXML xml;
+ 		xml.addTag("ExternalSearch");
+-		xml.addChildAttrib("Version", 2);
++		xml.addChildAttrib("Version", 3);
+ 		xml.stepIn();
+ 
+ 		xml.addTag("Soulseek");
+@@ -322,6 +488,13 @@ bool ExternalSearchManager::saveConfig(const SoulseekConfig& newSoulseek, const
+ 		xml.addChildAttrib("FileLimit", std::max(1, newSoulseek.fileLimit));
+ 		xml.addChildAttrib("ResponseLimit", std::max(1, newSoulseek.responseLimit));
+ 
++		xml.addTag("Amule");
++		xml.addChildAttrib("Enabled", newAmule.enabled);
++		xml.addChildAttrib("BaseUrl", trimTrailingSlash(newAmule.baseUrl));
++		xml.addChildAttrib("Password", newAmule.password);
++		xml.addChildAttrib("SearchType", newAmule.searchType);
++		xml.addChildAttrib("SearchTimeout", std::max(10, newAmule.searchTimeout));
++
+ 		xml.addTag("QBittorrent");
+ 		xml.addChildAttrib("Enabled", newQbittorrent.enabled);
+ 		xml.addChildAttrib("BaseUrl", trimTrailingSlash(newQbittorrent.baseUrl));
+@@ -369,11 +542,12 @@ bool ExternalSearchManager::saveConfig(const SoulseekConfig& newSoulseek, const
+ 	}
+ }
+ 
+-void ExternalSearchManager::getConfig(SoulseekConfig& outSoulseek, QbittorrentConfig& outQbittorrent,
++void ExternalSearchManager::getConfig(SoulseekConfig& outSoulseek, AmuleConfig& outAmule, QbittorrentConfig& outQbittorrent,
+ 	std::vector<TorznabSource>& outTorznab) const noexcept
+ {
+ 	LOCK(cs);
+ 	outSoulseek = soulseek;
++	outAmule = amule;
+ 	outQbittorrent = qbittorrent;
+ 	outTorznab = torznab;
+ }
+@@ -383,6 +557,7 @@ bool ExternalSearchManager::hasEnabledBackends() const noexcept
+ 	LOCK(cs);
+ 	if (stopped) return false;
+ 	if (soulseek.enabled && !soulseek.baseUrl.empty()) return true;
++	if (amule.enabled && !amule.baseUrl.empty() && !amule.password.empty() && isSafeAmuleUrl(amule.baseUrl)) return true;
+ 	for (const auto& source : torznab)
+ 		if (source.enabled && !source.url.empty()) return true;
+ 	return false;
+@@ -394,11 +569,13 @@ unsigned ExternalSearchManager::search(const string& query, uint64_t ownerId) no
+ 	cancelSearch(ownerId);
+ 	unsigned maxTime = 0;
+ 	SoulseekConfig sc;
++	AmuleConfig ac;
+ 	std::vector<TorznabSource> tz;
+ 	{
+ 		LOCK(cs);
+ 		if (stopped) return 0;
+ 		sc = soulseek;
++		ac = amule;
+ 		tz = torznab;
+ 	}
+ 	if (sc.enabled && !sc.baseUrl.empty())
+@@ -406,6 +583,18 @@ unsigned ExternalSearchManager::search(const string& query, uint64_t ownerId) no
+ 		startSoulseekSearch(query, ownerId);
+ 		maxTime = std::max<unsigned>(maxTime, (unsigned) (sc.searchTimeout + 5) * 1000);
+ 	}
++	if (ac.enabled && !ac.baseUrl.empty() && !ac.password.empty())
++	{
++		if (isSafeAmuleUrl(ac.baseUrl))
++		{
++			startAmuleSearch(query, ownerId);
++			maxTime = std::max<unsigned>(maxTime, (unsigned) (ac.searchTimeout + 5) * 1000);
++		}
++		else
++		{
++			fire(ExternalSearchListener::Error(), ownerId, "aMule: remote amuleapi requires HTTPS; plain HTTP is allowed only on localhost");
++		}
++	}
+ 	for (size_t i = 0; i < tz.size(); ++i)
+ 	{
+ 		if (tz[i].enabled && !tz[i].url.empty())
+@@ -602,6 +791,349 @@ void ExternalSearchManager::startQbittorrentAdd(const QbittorrentConfig& qc, con
+ 	httpClient.startRequest(requestId);
+ }
+ 
++bool ExternalSearchManager::isSafeAmuleUrl(const string& url) noexcept
++{
++	Util::ParsedUrl p;
++	Util::decodeUrl(url, p, "http");
++	const string protocol = Text::toLower(p.protocol);
++	const string host = Text::toLower(p.host);
++	if (host.empty()) return false;
++	if (protocol == "https") return true;
++	if (protocol != "http") return false;
++	return host == "localhost" || host == "::1" || host == "127.0.0.1";
++}
++
++void ExternalSearchManager::addAmuleAuthHeader(HttpClient::Request& req, const string& token)
++{
++	if (!token.empty()) req.headers.push_back(std::make_pair(string("Authorization"), string("Bearer ") + token));
++}
++
++bool ExternalSearchManager::parseAmuleLogin(const string& json, string& token, string& role) noexcept
++{
++	AmuleLoginParser p;
++	p.setFlags(JsonParser::FLAG_VALIDATE_UTF8 | JsonParser::FLAG_STRICT_NUMBER_CHECKS);
++	if (p.process(json.data(), json.size()) != JsonParser::NO_ERROR || p.finish() != JsonParser::NO_ERROR) return false;
++	token = p.token;
++	role = p.role;
++	return !token.empty();
++}
++
++bool ExternalSearchManager::parseAmuleSearchStart(const string& json, string& searchId) noexcept
++{
++	AmuleSearchStartParser p;
++	p.setFlags(JsonParser::FLAG_VALIDATE_UTF8 | JsonParser::FLAG_STRICT_NUMBER_CHECKS);
++	if (p.process(json.data(), json.size()) != JsonParser::NO_ERROR || p.finish() != JsonParser::NO_ERROR) return false;
++	searchId = p.id;
++	return !searchId.empty() && Util::toInt64(searchId) > 0;
++}
++
++bool ExternalSearchManager::parseAmuleResults(const string& json, uint64_t ownerId, const string& searchId, const string& searchKind,
++	std::vector<ExternalSearch::Result>& results, std::unordered_set<string>& seen, string& state) noexcept
++{
++	AmuleResultsParser p(ownerId, searchId, searchKind, results, seen);
++	p.setFlags(JsonParser::FLAG_VALIDATE_UTF8 | JsonParser::FLAG_STRICT_NUMBER_CHECKS);
++	if (p.process(json.data(), json.size()) != JsonParser::NO_ERROR || p.finish() != JsonParser::NO_ERROR) return false;
++	state = p.state;
++	return true;
++}
++
++void ExternalSearchManager::startAmuleLoginForSearch(const string& query, uint64_t ownerId) noexcept
++{
++	AmuleConfig ac;
++	{
++		LOCK(cs);
++		if (stopped) return;
++		ac = amule;
++	}
++	if (!ac.enabled || ac.baseUrl.empty() || ac.password.empty() || !isSafeAmuleUrl(ac.baseUrl))
++	{
++		fire(ExternalSearchListener::Error(), ownerId, "aMule: amuleapi is not configured safely");
++		return;
++	}
++
++	JsonFormatter jf;
++	jf.setDecorate(false);
++	jf.open('{');
++	jf.appendKey("password"); jf.appendStringValue(ac.password);
++	jf.close('}');
++
++	HttpClient::Request req;
++	req.type = Http::METHOD_POST;
++	req.url = ac.baseUrl + "/api/v0/auth/login";
++	req.requestBody = jf.getResult();
++	req.requestBodyType = "application/json";
++	req.closeConn = true;
++	req.noCache = true;
++	req.maxRedirects = 0;
++	req.maxRespBodySize = 1024 * 1024;
++	req.headers.push_back(std::make_pair(string("Accept"), string("application/jwt")));
++	const uint64_t requestId = httpClient.addRequest(req);
++	if (!requestId)
++	{
++		fire(ExternalSearchListener::Error(), ownerId, "aMule: cannot create login request");
++		return;
++	}
++	PendingRequest p;
++	p.kind = REQ_AMULE_LOGIN_SEARCH;
++	p.ownerId = ownerId;
++	p.query = query;
++	p.searchKind = ac.searchType;
++	p.retryCount = 1;
++	{
++		LOCK(cs);
++		pending[requestId] = p;
++	}
++	httpClient.startRequest(requestId);
++}
++
++void ExternalSearchManager::startAmuleLoginForDownload(const string& hash, uint64_t ownerId) noexcept
++{
++	AmuleConfig ac;
++	{
++		LOCK(cs);
++		if (stopped) return;
++		ac = amule;
++	}
++	if (!ac.enabled || ac.baseUrl.empty() || ac.password.empty() || !isSafeAmuleUrl(ac.baseUrl))
++	{
++		fire(ExternalSearchListener::Error(), ownerId, "aMule: amuleapi is not configured safely");
++		return;
++	}
++
++	JsonFormatter jf;
++	jf.setDecorate(false);
++	jf.open('{');
++	jf.appendKey("password"); jf.appendStringValue(ac.password);
++	jf.close('}');
++
++	HttpClient::Request req;
++	req.type = Http::METHOD_POST;
++	req.url = ac.baseUrl + "/api/v0/auth/login";
++	req.requestBody = jf.getResult();
++	req.requestBodyType = "application/json";
++	req.closeConn = true;
++	req.noCache = true;
++	req.maxRedirects = 0;
++	req.maxRespBodySize = 1024 * 1024;
++	req.headers.push_back(std::make_pair(string("Accept"), string("application/jwt")));
++	const uint64_t requestId = httpClient.addRequest(req);
++	if (!requestId)
++	{
++		fire(ExternalSearchListener::Error(), ownerId, "aMule: cannot create login request");
++		return;
++	}
++	PendingRequest p;
++	p.kind = REQ_AMULE_LOGIN_DOWNLOAD;
++	p.ownerId = ownerId;
++	p.downloadUri = hash;
++	p.retryCount = 1;
++	{
++		LOCK(cs);
++		pending[requestId] = p;
++	}
++	httpClient.startRequest(requestId);
++}
++
++void ExternalSearchManager::startAmuleSearch(const string& query, uint64_t ownerId, int retryCount) noexcept
++{
++	AmuleConfig ac;
++	string token;
++	{
++		LOCK(cs);
++		if (stopped) return;
++		ac = amule;
++		token = amuleBearer;
++	}
++	if (!ac.enabled || ac.baseUrl.empty() || ac.password.empty()) return;
++	if (!isSafeAmuleUrl(ac.baseUrl))
++	{
++		fire(ExternalSearchListener::Error(), ownerId, "aMule: remote amuleapi requires HTTPS; plain HTTP is allowed only on localhost");
++		return;
++	}
++	if (token.empty())
++	{
++		startAmuleLoginForSearch(query, ownerId);
++		return;
++	}
++
++	JsonFormatter jf;
++	jf.setDecorate(false);
++	jf.open('{');
++	jf.appendKey("query"); jf.appendStringValue(query);
++	jf.appendKey("type"); jf.appendStringValue(ac.searchType);
++	jf.close('}');
++
++	HttpClient::Request req;
++	req.type = Http::METHOD_POST;
++	req.url = ac.baseUrl + "/api/v0/search";
++	req.requestBody = jf.getResult();
++	req.requestBodyType = "application/json";
++	req.closeConn = true;
++	req.noCache = true;
++	req.maxRedirects = 0;
++	req.maxRespBodySize = 2 * 1024 * 1024;
++	addAmuleAuthHeader(req, token);
++	const uint64_t requestId = httpClient.addRequest(req);
++	if (!requestId)
++	{
++		fire(ExternalSearchListener::Error(), ownerId, "aMule: cannot create search request");
++		return;
++	}
++	PendingRequest p;
++	p.kind = REQ_AMULE_SEARCH;
++	p.ownerId = ownerId;
++	p.query = query;
++	p.searchKind = ac.searchType;
++	p.retryCount = retryCount;
++	{
++		LOCK(cs);
++		pending[requestId] = p;
++	}
++	httpClient.startRequest(requestId);
++	fire(ExternalSearchListener::Status(), ownerId, string("aMule/") + ac.searchType + ": поиск запущен");
++}
++
++void ExternalSearchManager::pollAmule(uint64_t ownerId, const string& searchId) noexcept
++{
++	AmuleConfig ac;
++	string token;
++	{
++		LOCK(cs);
++		if (stopped) return;
++		ac = amule;
++		token = amuleBearer;
++	}
++	if (token.empty() || !isSafeAmuleUrl(ac.baseUrl)) return;
++
++	HttpClient::Request req;
++	req.type = Http::METHOD_GET;
++	req.url = ac.baseUrl + "/api/v0/search/results?search_id=" + Util::encodeUriQuery(searchId);
++	req.closeConn = true;
++	req.noCache = true;
++	req.maxRedirects = 0;
++	req.maxRespBodySize = EXTERNAL_SEARCH_MAX_HTTP_BODY;
++	addAmuleAuthHeader(req, token);
++	const uint64_t requestId = httpClient.addRequest(req);
++	if (!requestId) return;
++	PendingRequest p;
++	p.kind = REQ_AMULE_RESULTS;
++	p.ownerId = ownerId;
++	p.searchId = searchId;
++	{
++		LOCK(cs);
++		pending[requestId] = p;
++		for (auto& s : activeAmule)
++			if (s.ownerId == ownerId && s.id == searchId) { s.pollReqId = requestId; break; }
++	}
++	httpClient.startRequest(requestId);
++}
++
++void ExternalSearchManager::startAmuleDownload(const string& hash, uint64_t ownerId, int retryCount) noexcept
++{
++	AmuleConfig ac;
++	string token;
++	{
++		LOCK(cs);
++		if (stopped) return;
++		ac = amule;
++		token = amuleBearer;
++	}
++	if (hash.empty() || !ac.enabled || ac.baseUrl.empty() || ac.password.empty()) return;
++	if (!isSafeAmuleUrl(ac.baseUrl))
++	{
++		fire(ExternalSearchListener::Error(), ownerId, "aMule: remote amuleapi requires HTTPS; plain HTTP is allowed only on localhost");
++		return;
++	}
++	if (token.empty())
++	{
++		startAmuleLoginForDownload(hash, ownerId);
++		return;
++	}
++
++	HttpClient::Request req;
++	req.type = Http::METHOD_POST;
++	req.url = ac.baseUrl + "/api/v0/search/results/" + Util::encodeUriPath(hash) + "/download";
++	req.requestBodyType = "application/json";
++	req.requestBody = "{}";
++	req.closeConn = true;
++	req.noCache = true;
++	req.maxRedirects = 0;
++	req.maxRespBodySize = 2 * 1024 * 1024;
++	addAmuleAuthHeader(req, token);
++	const uint64_t requestId = httpClient.addRequest(req);
++	if (!requestId)
++	{
++		fire(ExternalSearchListener::Error(), ownerId, "aMule: cannot create download request");
++		return;
++	}
++	PendingRequest p;
++	p.kind = REQ_AMULE_DOWNLOAD;
++	p.ownerId = ownerId;
++	p.downloadUri = hash;
++	p.retryCount = retryCount;
++	{
++		LOCK(cs);
++		pending[requestId] = p;
++	}
++	httpClient.startRequest(requestId);
++}
++
++void ExternalSearchManager::startAmuleStop(uint64_t ownerId, const string& searchId, bool close) noexcept
++{
++	AmuleConfig ac;
++	string token;
++	{
++		LOCK(cs);
++		if (stopped) return;
++		ac = amule;
++		token = amuleBearer;
++	}
++	if (searchId.empty() || token.empty() || !isSafeAmuleUrl(ac.baseUrl)) return;
++
++	JsonFormatter jf;
++	jf.setDecorate(false);
++	jf.open('{');
++	jf.appendKey("search_id"); jf.appendInt64Value(Util::toInt64(searchId));
++	jf.appendKey("close"); jf.appendBoolValue(close);
++	jf.close('}');
++
++	HttpClient::Request req;
++	req.type = Http::METHOD_POST;
++	req.url = ac.baseUrl + "/api/v0/search/stop";
++	req.requestBody = jf.getResult();
++	req.requestBodyType = "application/json";
++	req.closeConn = true;
++	req.noCache = true;
++	req.maxRedirects = 0;
++	req.maxRespBodySize = 1024 * 1024;
++	addAmuleAuthHeader(req, token);
++	const uint64_t requestId = httpClient.addRequest(req);
++	if (!requestId) return;
++	PendingRequest p;
++	p.kind = REQ_AMULE_STOP;
++	p.ownerId = ownerId;
++	p.searchId = searchId;
++	{
++		LOCK(cs);
++		pending[requestId] = p;
++	}
++	httpClient.startRequest(requestId);
++}
++
++bool ExternalSearchManager::enqueueAmule(const ExternalSearch::Result& result) noexcept
++{
++	if (result.hash.empty()) return false;
++	AmuleConfig ac;
++	{
++		LOCK(cs);
++		if (stopped || !amule.enabled || amule.baseUrl.empty() || amule.password.empty()) return false;
++		ac = amule;
++	}
++	if (!isSafeAmuleUrl(ac.baseUrl)) return false;
++	startAmuleDownload(result.hash, result.ownerId);
++	return true;
++}
++
+ void ExternalSearchManager::startTorznabSearch(const string& query, uint64_t ownerId, int sourceIndex) noexcept
+ {
+ 	TorznabSource source;
+@@ -759,6 +1291,19 @@ void ExternalSearchManager::on(HttpClientListener::Completed, uint64_t id, const
+ 	if (!found) return;
+ 	const int code = resp.getResponseCode();
+ 
++	// aMule bearer tokens are cached. If an old token is rejected, clear it and
++	// perform exactly one password login before retrying the user action.
++	if (code == 401 && p.retryCount == 0 && (p.kind == REQ_AMULE_SEARCH || p.kind == REQ_AMULE_DOWNLOAD))
++	{
++		{
++			LOCK(cs);
++			amuleBearer.clear();
++		}
++		if (p.kind == REQ_AMULE_SEARCH) startAmuleLoginForSearch(p.query, p.ownerId);
++		else startAmuleLoginForDownload(p.downloadUri, p.ownerId);
++		return;
++	}
++
+ 	// qBittorrent session cookies may expire. Retry a single time by logging in
+ 	// again, but never retry API-key authentication or recurse indefinitely.
+ 	if (p.kind == REQ_QBT_ADD && (code == 401 || code == 403) && p.retryCount == 0)
+@@ -790,6 +1335,84 @@ void ExternalSearchManager::on(HttpClientListener::Completed, uint64_t id, const
+ 		return;
+ 	}
+ 
++	if (p.kind == REQ_AMULE_LOGIN_SEARCH || p.kind == REQ_AMULE_LOGIN_DOWNLOAD)
++	{
++		string token, role;
++		if (!parseAmuleLogin(data.responseBody, token, role) || role != "admin")
++		{
++			fire(ExternalSearchListener::Error(), p.ownerId, "aMule: amuleapi login failed or admin role was not granted");
++			return;
++		}
++		{
++			LOCK(cs);
++			amuleBearer = token;
++		}
++		if (p.kind == REQ_AMULE_LOGIN_SEARCH) startAmuleSearch(p.query, p.ownerId, 1);
++		else startAmuleDownload(p.downloadUri, p.ownerId, 1);
++		return;
++	}
++
++	if (p.kind == REQ_AMULE_SEARCH)
++	{
++		string searchId;
++		if (!parseAmuleSearchStart(data.responseBody, searchId))
++		{
++			fire(ExternalSearchListener::Error(), p.ownerId, "aMule: invalid search start response");
++			return;
++		}
++		ActiveAmuleSearch a;
++		a.ownerId = p.ownerId;
++		a.id = searchId;
++		a.kind = p.searchKind.empty() ? "global" : p.searchKind;
++		a.nextPoll = GET_TICK();
++		{
++			LOCK(cs);
++			a.expires = GET_TICK() + (uint64_t) std::max(10, amule.searchTimeout) * 1000;
++			activeAmule.push_back(a);
++		}
++		pollAmule(p.ownerId, searchId);
++		return;
++	}
++
++	if (p.kind == REQ_AMULE_RESULTS)
++	{
++		std::vector<ExternalSearch::Result> results;
++		string state;
++		bool ok = false;
++		bool finished = false;
++		{
++			LOCK(cs);
++			for (auto& a : activeAmule)
++			{
++				if (a.ownerId == p.ownerId && a.id == p.searchId)
++				{
++					a.pollReqId = 0;
++					ok = parseAmuleResults(data.responseBody, p.ownerId, p.searchId, a.kind, results, a.seen, state);
++					finished = state == "finished";
++					a.finished = finished;
++					if (!finished) a.nextPoll = GET_TICK() + AMULE_POLL_INTERVAL;
++					break;
++				}
++			}
++		}
++		if (!ok)
++		{
++			fire(ExternalSearchListener::Error(), p.ownerId, "aMule: failed to parse eD2k/Kad search results");
++			return;
++		}
++		for (const auto& r : results) fire(ExternalSearchListener::Result(), r);
++		if (finished) fire(ExternalSearchListener::Status(), p.ownerId, "aMule: поиск завершён, результаты оставлены доступными для загрузки");
++		return;
++	}
++
++	if (p.kind == REQ_AMULE_DOWNLOAD)
++	{
++		fire(ExternalSearchListener::Status(), p.ownerId, "eD2k/Kad: файл передан в aMule");
++		return;
++	}
++
++	if (p.kind == REQ_AMULE_STOP) return;
++
+ 	if (p.kind == REQ_QBT_LOGIN)
+ 	{
+ 		const string cookie = extractSessionCookie(resp);
+@@ -887,14 +1510,18 @@ void ExternalSearchManager::on(HttpClientListener::Failed, uint64_t id, const st
+ 		if (i != pending.end()) { p = i->second; pending.erase(i); found = true; }
+ 		if (found && p.kind == REQ_SLSK_RESPONSES)
+ 			for (auto& s : activeSoulseek) if (s.pollReqId == id) { s.pollReqId = 0; s.nextPoll = GET_TICK() + SLSKD_POLL_INTERVAL; break; }
++		if (found && p.kind == REQ_AMULE_RESULTS)
++			for (auto& a : activeAmule) if (a.pollReqId == id) { a.pollReqId = 0; if (!a.finished) a.nextPoll = GET_TICK() + AMULE_POLL_INTERVAL; break; }
+ 	}
+ 	if (found) fire(ExternalSearchListener::Error(), p.ownerId, "External Search: " + error);
+ }
+ 
+ void ExternalSearchManager::on(TimerManagerListener::Second, uint64_t tick) noexcept
+ {
+-	std::vector<std::pair<uint64_t, string> > polls;
++	std::vector<std::pair<uint64_t, string> > soulseekPolls;
++	std::vector<std::pair<uint64_t, string> > amulePolls;
+ 	std::vector<uint64_t> cancelIds;
++	std::vector<std::pair<uint64_t, string> > amuleTimeouts;
+ 	{
+ 		LOCK(cs);
+ 		if (stopped) return;
+@@ -902,33 +1529,56 @@ void ExternalSearchManager::on(TimerManagerListener::Second, uint64_t tick) noex
+ 		{
+ 			if (tick >= i->expires)
+ 			{
+-				// Never cancel an HTTP request while holding ExternalSearchManager's lock: the
+-				// cancellation path may synchronously notify listeners.
+ 				if (i->pollReqId) cancelIds.push_back(i->pollReqId);
+ 				i = activeSoulseek.erase(i);
+ 				continue;
+ 			}
+ 			if (!i->pollReqId && tick >= i->nextPoll)
+ 			{
+-				polls.push_back(std::make_pair(i->ownerId, i->id));
++				soulseekPolls.push_back(std::make_pair(i->ownerId, i->id));
+ 				i->nextPoll = tick + SLSKD_POLL_INTERVAL;
+ 			}
+ 			++i;
+ 		}
++		for (auto& a : activeAmule)
++		{
++			if (a.finished) continue;
++			if (tick >= a.expires)
++			{
++				if (a.pollReqId) { cancelIds.push_back(a.pollReqId); a.pollReqId = 0; }
++				a.finished = true;
++				amuleTimeouts.push_back(std::make_pair(a.ownerId, a.id));
++				continue;
++			}
++			if (!a.pollReqId && tick >= a.nextPoll)
++			{
++				amulePolls.push_back(std::make_pair(a.ownerId, a.id));
++				a.nextPoll = tick + AMULE_POLL_INTERVAL;
++			}
++		}
+ 	}
+ 	for (uint64_t requestId : cancelIds) httpClient.cancelRequest(requestId);
+-	for (const auto& p : polls) pollSoulseek(p.first, p.second);
++	for (const auto& p : soulseekPolls) pollSoulseek(p.first, p.second);
++	for (const auto& p : amulePolls) pollAmule(p.first, p.second);
++	for (const auto& a : amuleTimeouts)
++	{
++		startAmuleStop(a.first, a.second, false);
++		fire(ExternalSearchListener::Status(), a.first, "aMule: лимит ожидания поиска истёк; поиск остановлен, уже найденные результаты оставлены доступными");
++	}
+ }
+ 
+ void ExternalSearchManager::cancelSearch(uint64_t ownerId) noexcept
+ {
+ 	std::vector<uint64_t> cancelIds;
++	std::vector<string> amuleSearchIds;
+ 	{
+ 		LOCK(cs);
+ 		for (auto i = pending.begin(); i != pending.end(); )
+ 		{
+-			if (i->second.ownerId == ownerId && i->second.kind != REQ_SLSK_DOWNLOAD &&
+-				i->second.kind != REQ_QBT_LOGIN && i->second.kind != REQ_QBT_ADD)
++			const RequestKind kind = i->second.kind;
++			const bool downloadAction = kind == REQ_SLSK_DOWNLOAD || kind == REQ_QBT_LOGIN || kind == REQ_QBT_ADD ||
++				kind == REQ_AMULE_LOGIN_DOWNLOAD || kind == REQ_AMULE_DOWNLOAD || kind == REQ_AMULE_STOP;
++			if (i->second.ownerId == ownerId && !downloadAction)
+ 			{
+ 				cancelIds.push_back(i->first);
+ 				i = pending.erase(i);
+@@ -944,8 +1594,19 @@ void ExternalSearchManager::cancelSearch(uint64_t ownerId) noexcept
+ 			}
+ 			else ++i;
+ 		}
++		for (auto i = activeAmule.begin(); i != activeAmule.end(); )
++		{
++			if (i->ownerId == ownerId)
++			{
++				if (i->pollReqId) cancelIds.push_back(i->pollReqId);
++				amuleSearchIds.push_back(i->id);
++				i = activeAmule.erase(i);
++			}
++			else ++i;
++		}
+ 	}
+ 	for (uint64_t reqId : cancelIds) httpClient.cancelRequest(reqId);
++	for (const string& searchId : amuleSearchIds) startAmuleStop(ownerId, searchId);
+ }
+ 
+ bool ExternalSearchManager::enqueueDownload(const ExternalSearch::Result& result, const string& destination) noexcept
+@@ -954,6 +1615,8 @@ bool ExternalSearchManager::enqueueDownload(const ExternalSearch::Result& result
+ 		return enqueueSoulseek(result, destination);
+ 	if (result.network == ExternalSearch::NETWORK_BITTORRENT)
+ 		return enqueueQbittorrent(result, destination);
++	if (result.network == ExternalSearch::NETWORK_ED2K)
++		return enqueueAmule(result);
+ 	return false;
+ }
+ 
+@@ -1056,6 +1719,9 @@ void ExternalSearchManager::shutdown() noexcept
+ 		pending.clear();
+ 		for (const auto& s : activeSoulseek) if (s.pollReqId) requests.push_back(s.pollReqId);
+ 		activeSoulseek.clear();
++		for (const auto& a : activeAmule) if (a.pollReqId) requests.push_back(a.pollReqId);
++		activeAmule.clear();
++		amuleBearer.clear();
+ 	}
+ 	for (uint64_t id : requests) httpClient.cancelRequest(id);
+ 	if (TimerManager::isValidInstance()) TimerManager::getInstance()->removeListener(this);
+diff --git a/client/ExternalSearchManager.h b/client/ExternalSearchManager.h
+index 726aca8..6371d0b 100644
+--- a/client/ExternalSearchManager.h
++++ b/client/ExternalSearchManager.h
+@@ -28,6 +28,16 @@ public:
+ 		int responseLimit;
+ 	};
+ 
++	struct AmuleConfig
++	{
++		AmuleConfig() : enabled(false), baseUrl("http://127.0.0.1:4713"), searchType("global"), searchTimeout(60) {}
++		bool enabled;
++		string baseUrl;
++		string password;
++		string searchType;
++		int searchTimeout;
++	};
++
+ 	struct TorznabSource
+ 	{
+ 		TorznabSource() : enabled(false) {}
+@@ -50,11 +60,12 @@ public:
+ 	};
+ 
+ 	void reloadConfig() noexcept;
+-	bool saveConfig(const SoulseekConfig& newSoulseek, const QbittorrentConfig& newQbittorrent,
++	bool saveConfig(const SoulseekConfig& newSoulseek, const AmuleConfig& newAmule, const QbittorrentConfig& newQbittorrent,
+ 		const std::vector<TorznabSource>& newTorznab) noexcept;
+-	void getConfig(SoulseekConfig& outSoulseek, QbittorrentConfig& outQbittorrent,
++	void getConfig(SoulseekConfig& outSoulseek, AmuleConfig& outAmule, QbittorrentConfig& outQbittorrent,
+ 		std::vector<TorznabSource>& outTorznab) const noexcept;
+ 	string getConfigPath() const { return configPath(); }
++	static bool isSafeAmuleUrl(const string& url) noexcept;
+ 
+ 	bool hasEnabledBackends() const noexcept;
+ 	unsigned search(const string& query, uint64_t ownerId) noexcept;
+@@ -74,7 +85,13 @@ private:
+ 		REQ_SLSK_DOWNLOAD,
+ 		REQ_TORZNAB,
+ 		REQ_QBT_LOGIN,
+-		REQ_QBT_ADD
++		REQ_QBT_ADD,
++		REQ_AMULE_LOGIN_SEARCH,
++		REQ_AMULE_LOGIN_DOWNLOAD,
++		REQ_AMULE_SEARCH,
++		REQ_AMULE_RESULTS,
++		REQ_AMULE_DOWNLOAD,
++		REQ_AMULE_STOP
+ 	};
+ 
+ 	struct PendingRequest
+@@ -83,6 +100,8 @@ private:
+ 		RequestKind kind;
+ 		uint64_t ownerId;
+ 		string searchId;
++		string query;
++		string searchKind;
+ 		TorznabSource torznabSource;
+ 		string downloadUri;
+ 		string destination;
+@@ -100,18 +119,42 @@ private:
+ 		std::unordered_set<string> seen;
+ 	};
+ 
++	struct ActiveAmuleSearch
++	{
++		ActiveAmuleSearch() : ownerId(0), nextPoll(0), expires(0), pollReqId(0), finished(false) {}
++		uint64_t ownerId;
++		string id;
++		string kind;
++		uint64_t nextPoll;
++		uint64_t expires;
++		uint64_t pollReqId;
++		bool finished;
++		std::unordered_set<string> seen;
++	};
++
+ 	mutable CriticalSection cs;
+ 	SoulseekConfig soulseek;
++	AmuleConfig amule;
+ 	QbittorrentConfig qbittorrent;
+ 	std::vector<TorznabSource> torznab;
+ 	string qbSessionCookie;
++	string amuleBearer;
+ 	std::unordered_map<uint64_t, PendingRequest> pending;
+ 	std::vector<ActiveSoulseekSearch> activeSoulseek;
++	std::vector<ActiveAmuleSearch> activeAmule;
+ 	bool stopped;
+ 
+ 	string configPath() const;
+ 	void startSoulseekSearch(const string& query, uint64_t ownerId) noexcept;
+ 	void startTorznabSearch(const string& query, uint64_t ownerId, int sourceIndex) noexcept;
++
++	void startAmuleSearch(const string& query, uint64_t ownerId, int retryCount = 0) noexcept;
++	void startAmuleLoginForSearch(const string& query, uint64_t ownerId) noexcept;
++	void startAmuleLoginForDownload(const string& hash, uint64_t ownerId) noexcept;
++	void pollAmule(uint64_t ownerId, const string& searchId) noexcept;
++	void startAmuleDownload(const string& hash, uint64_t ownerId, int retryCount = 0) noexcept;
++	void startAmuleStop(uint64_t ownerId, const string& searchId, bool close = true) noexcept;
++	bool enqueueAmule(const ExternalSearch::Result& result) noexcept;
+ 	void pollSoulseek(uint64_t ownerId, const string& searchId) noexcept;
+ 	bool enqueueSoulseek(const ExternalSearch::Result& result, const string& destination) noexcept;
+ 	bool enqueueQbittorrent(const ExternalSearch::Result& result, const string& destination) noexcept;
+@@ -126,6 +169,11 @@ private:
+ 	static string makeMultipartBody(const string& boundary, const string& downloadUri,
+ 		const string& savePath, const string& category);
+ 	static string extractSessionCookie(const Http::Response& response) noexcept;
++	static bool parseAmuleLogin(const string& json, string& token, string& role) noexcept;
++	static bool parseAmuleSearchStart(const string& json, string& searchId) noexcept;
++	static bool parseAmuleResults(const string& json, uint64_t ownerId, const string& searchId, const string& searchKind,
++		std::vector<ExternalSearch::Result>& results, std::unordered_set<string>& seen, string& state) noexcept;
++	static void addAmuleAuthHeader(HttpClient::Request& req, const string& token);
+ 	static void addQbittorrentHeaders(HttpClient::Request& req, const QbittorrentConfig& qc, const string& cookie);
+ 	static bool parseSearchId(const string& json, string& id) noexcept;
+ 	static bool parseSoulseekResponses(const string& json, uint64_t ownerId, const string& searchId,
+diff --git a/client/ExternalSearchResult.h b/client/ExternalSearchResult.h
+index d751431..8e194fc 100644
+--- a/client/ExternalSearchResult.h
++++ b/client/ExternalSearchResult.h
+@@ -18,7 +18,7 @@ namespace ExternalSearch
+ 
+ 	struct Result
+ 	{
+-		Result() : ownerId(0), network(NETWORK_UNKNOWN), size(0), freeSlot(false), queueLength(0), uploadSpeed(0), seeders(0), leechers(0), locked(false) {}
++		Result() : ownerId(0), network(NETWORK_UNKNOWN), size(0), freeSlot(false), queueLength(0), uploadSpeed(0), seeders(0), leechers(0), sourceCount(0), completeSourceCount(0), locked(false) {}
+ 
+ 		uint64_t ownerId;
+ 		Network network;
+@@ -37,6 +37,8 @@ namespace ExternalSearch
+ 		int uploadSpeed;
+ 		int seeders;
+ 		int leechers;
++		int sourceCount;
++		int completeSourceCount;
+ 		bool locked;
+ 	};
+ }
+diff --git a/client/StringDefs.h b/client/StringDefs.h
+index bf2eac5..8e297da 100644
+--- a/client/StringDefs.h
++++ b/client/StringDefs.h
+@@ -2024,6 +2024,11 @@ enum Strings   // @DontAdd
+ 	EXTERNAL_SEARCH_SOULSEEK_URL_REQUIRED, // "Soulseek is enabled but slskd URL is empty."
+ 	EXTERNAL_SEARCH_QBITTORRENT_URL_REQUIRED, // "qBittorrent is enabled but WebUI URL is empty."
+ 	EXTERNAL_SEARCH_CONFIG_SAVE_FAILED, // "Failed to save ExternalSearch.xml."
++	EXTERNAL_SEARCH_AMULE, // "eD2k / Kad (aMule)"
++	EXTERNAL_SEARCH_SEARCH_MODE, // "Search mode"
++	EXTERNAL_SEARCH_AMULE_URL_REQUIRED, // "aMule is enabled but amuleapi URL is empty."
++	EXTERNAL_SEARCH_AMULE_PASSWORD_REQUIRED, // "aMule is enabled but the amuleapi admin password is empty."
++	EXTERNAL_SEARCH_AMULE_INSECURE_URL, // "Remote amuleapi requires HTTPS. Plain HTTP is allowed only on localhost."
+ 
+ 	_LAST // @DontAdd
+ };
+diff --git a/compiled/REPORT_FOR_CHATGPT.cmd b/compiled/REPORT_FOR_CHATGPT.cmd
+new file mode 100644
+index 0000000..c0469fe
+--- /dev/null
++++ b/compiled/REPORT_FOR_CHATGPT.cmd
+@@ -0,0 +1,6 @@
++@echo off
++setlocal
++chcp 65001 >nul
++powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0REPORT_FOR_CHATGPT.ps1"
++echo.
++pause
+diff --git a/compiled/REPORT_FOR_CHATGPT.ps1 b/compiled/REPORT_FOR_CHATGPT.ps1
+new file mode 100644
+index 0000000..5d9fe19
+--- /dev/null
++++ b/compiled/REPORT_FOR_CHATGPT.ps1
+@@ -0,0 +1,119 @@
++$ErrorActionPreference = 'SilentlyContinue'
++$root = Split-Path -Parent $MyInvocation.MyCommand.Path
++$stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
++$work = Join-Path $env:TEMP ("BlackLink_REPORT_" + $stamp + "_" + [guid]::NewGuid().ToString('N'))
++$zip = Join-Path $root ("REPORT_FOR_CHATGPT_" + $stamp + ".zip")
++New-Item -ItemType Directory -Force -Path $work | Out-Null
++
++function Safe-Path([string]$p) {
++    if ([string]::IsNullOrEmpty($p)) { return $p }
++    if ($env:USERPROFILE) { $p = $p -replace [regex]::Escape($env:USERPROFILE), '%USERPROFILE%' }
++    return $p
++}
++
++function Add-Line([string]$file, [string]$line) {
++    Add-Content -LiteralPath (Join-Path $work $file) -Value $line -Encoding UTF8
++}
++
++try {
++    Add-Line 'system.txt' ('Report time: ' + (Get-Date).ToString('o'))
++    Add-Line 'system.txt' ('PowerShell: ' + $PSVersionTable.PSVersion.ToString())
++    Add-Line 'system.txt' ('Process architecture: ' + $(if ([Environment]::Is64BitProcess) {'x64'} else {'x86'}))
++    Add-Line 'system.txt' ('OS architecture: ' + $(if ([Environment]::Is64BitOperatingSystem) {'x64'} else {'x86'}))
++    $os = Get-CimInstance Win32_OperatingSystem
++    if ($os) {
++        Add-Line 'system.txt' ('OS: ' + $os.Caption + ' ' + $os.Version + ' build ' + $os.BuildNumber)
++    }
++
++    $exe = Join-Path $root 'blacklink_x64.exe'
++    if (Test-Path -LiteralPath $exe) {
++        $fi = Get-Item -LiteralPath $exe
++        Add-Line 'build.txt' ('Executable: blacklink_x64.exe')
++        Add-Line 'build.txt' ('Size: ' + $fi.Length)
++        Add-Line 'build.txt' ('Modified: ' + $fi.LastWriteTimeUtc.ToString('o'))
++        Add-Line 'build.txt' ('FileVersion: ' + $fi.VersionInfo.FileVersion)
++        Add-Line 'build.txt' ('ProductVersion: ' + $fi.VersionInfo.ProductVersion)
++        $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $exe
++        if ($hash) { Add-Line 'build.txt' ('SHA256: ' + $hash.Hash.ToLowerInvariant()) }
++    } else {
++        Add-Line 'build.txt' 'Executable not found next to the report script.'
++    }
++
++    $proc = Get-Process -Name 'blacklink_x64' -ErrorAction SilentlyContinue
++    if ($proc) {
++        foreach ($p in $proc) {
++            Add-Line 'runtime.txt' ('Running PID=' + $p.Id + ' StartTime=' + $p.StartTime.ToString('o') + ' WorkingSet=' + $p.WorkingSet64)
++        }
++    } else {
++        Add-Line 'runtime.txt' 'blacklink_x64.exe is not running.'
++    }
++
++    $configRoots = @()
++    $portable = Join-Path $root 'Settings'
++    if (Test-Path -LiteralPath $portable) { $configRoots += $portable }
++    if ($env:APPDATA) {
++        $profile = Join-Path $env:APPDATA 'BlackLink'
++        if ((Test-Path -LiteralPath $profile) -and ($configRoots -notcontains $profile)) { $configRoots += $profile }
++    }
++
++    if ($configRoots.Count -eq 0) {
++        Add-Line 'config_inventory.txt' 'No standard BlackLink configuration directory found.'
++    }
++
++    $n = 0
++    foreach ($cfg in $configRoots) {
++        $n++
++        Add-Line 'config_inventory.txt' ('Config root #' + $n + ': ' + (Safe-Path $cfg))
++        Get-ChildItem -LiteralPath $cfg -File -Recurse -ErrorAction SilentlyContinue | Sort-Object FullName | ForEach-Object {
++            Add-Line 'config_inventory.txt' ('  ' + (Safe-Path $_.FullName) + ' | ' + $_.Length + ' bytes | ' + $_.LastWriteTimeUtc.ToString('o'))
++        }
++
++        $external = Join-Path $cfg 'ExternalSearch.xml'
++        if (Test-Path -LiteralPath $external) {
++            $text = Get-Content -LiteralPath $external -Raw
++            $text = $text -replace '(?i)(ApiKey|Password|Username)="[^"]*"', '$1="<redacted>"'
++            Set-Content -LiteralPath (Join-Path $work ("ExternalSearch_sanitized_" + $n + ".xml")) -Value $text -Encoding UTF8
++        }
++
++        Get-ChildItem -LiteralPath $cfg -File -Recurse -Filter 'exceptioninfo*.txt' -ErrorAction SilentlyContinue | Select-Object -First 10 | ForEach-Object {
++            $dst = Join-Path $work ("exceptioninfo_" + $n + '_' + [IO.Path]::GetFileName($_.FullName))
++            Copy-Item -LiteralPath $_.FullName -Destination $dst -Force
++        }
++    }
++
++    $rootExternal = Join-Path $root 'Settings\ExternalSearch.xml'
++    if ((Test-Path -LiteralPath $rootExternal) -and $configRoots.Count -eq 0) {
++        $text = Get-Content -LiteralPath $rootExternal -Raw
++        $text = $text -replace '(?i)(ApiKey|Password|Username)="[^"]*"', '$1="<redacted>"'
++        Set-Content -LiteralPath (Join-Path $work 'ExternalSearch_sanitized.xml') -Value $text -Encoding UTF8
++    }
++
++    Add-Line 'logs_inventory.txt' 'Log contents are not copied automatically; only metadata is collected to avoid leaking private chat/PM data.'
++    $scanRoots = @($root) + $configRoots
++    foreach ($base in $scanRoots | Select-Object -Unique) {
++        Get-ChildItem -LiteralPath $base -File -Recurse -Include '*.log','*.dmp','*.mdmp' -ErrorAction SilentlyContinue | Sort-Object FullName | ForEach-Object {
++            Add-Line 'logs_inventory.txt' ((Safe-Path $_.FullName) + ' | ' + $_.Length + ' bytes | ' + $_.LastWriteTimeUtc.ToString('o'))
++        }
++    }
++
++    try {
++        $events = Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=(Get-Date).AddDays(-2)} -MaxEvents 300 -ErrorAction Stop |
++            Where-Object { ($_.ProviderName -eq 'Application Error' -and $_.Message -match '(?i)blacklink') -or $_.Message -match '(?i)blacklink_x64' } |
++            Select-Object -First 30 TimeCreated, Id, LevelDisplayName, ProviderName, Message
++        if ($events) { $events | Format-List | Out-File -LiteralPath (Join-Path $work 'windows_events.txt') -Encoding UTF8 -Width 240 }
++    } catch {
++        Add-Line 'windows_events.txt' ('Event log read failed: ' + $_.Exception.Message)
++    }
++
++    if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
++    Compress-Archive -Path (Join-Path $work '*') -DestinationPath $zip -CompressionLevel Optimal -Force
++    Write-Host ''
++    Write-Host 'Отчёт готов:' -ForegroundColor Green
++    Write-Host $zip
++    Write-Host ''
++    Write-Host 'Пришли этот ZIP в чат. Пароли/API-ключи из ExternalSearch.xml автоматически скрыты.'
++} catch {
++    Write-Host ('Не удалось собрать отчёт: ' + $_.Exception.Message) -ForegroundColor Red
++} finally {
++    Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
++}
+diff --git a/compiled/Settings/ExternalSearch.xml b/compiled/Settings/ExternalSearch.xml
+index ae4fd6b..4e4c947 100644
+--- a/compiled/Settings/ExternalSearch.xml
++++ b/compiled/Settings/ExternalSearch.xml
+@@ -1,11 +1,18 @@
+ <?xml version="1.0" encoding="utf-8"?>
+-<ExternalSearch Version="2">
++<ExternalSearch Version="3">
+   <!--
+     Soulseek backend: slskd (https://github.com/slskd/slskd)
+     Set Enabled="1", BaseUrl to the local slskd web/API address and ApiKey to a key configured in slskd.
+   -->
+   <Soulseek Enabled="0" BaseUrl="http://127.0.0.1:5030" ApiKey="" SearchTimeout="15" FileLimit="1000" ResponseLimit="100" />
+ 
++  <!--
++    eD2k/Kad backend via the official aMule amuleapi REST service.
++    amuleapi listens on 127.0.0.1:4713 by default and talks to aMule/amuled EC internally on 4712.
++    Plain HTTP is accepted only for loopback. Use HTTPS through a reverse proxy for a remote amuleapi.
++  -->
++  <Amule Enabled="0" BaseUrl="http://127.0.0.1:4713" Password="" SearchType="global" SearchTimeout="60" />
++
+   <!--
+     qBittorrent WebUI API download backend. API key (Bearer) is preferred on current qBittorrent.
+     Username/password is kept for older installations using cookie sessions. Keep the WebUI local when possible.
+diff --git a/windows/ExternalSearchSettingsDlg.cpp b/windows/ExternalSearchSettingsDlg.cpp
+index 1f62c21..34a66c1 100644
+--- a/windows/ExternalSearchSettingsDlg.cpp
++++ b/windows/ExternalSearchSettingsDlg.cpp
+@@ -85,6 +85,12 @@ LRESULT ExternalSearchSettingsDlg::onInitDialog(UINT, WPARAM, LPARAM, BOOL&)
+     SetDlgItemText(IDC_EXT_LABEL_TIMEOUT, CTSTRING(EXTERNAL_SEARCH_TIMEOUT));
+     SetDlgItemText(IDC_EXT_LABEL_FILE_LIMIT, CTSTRING(EXTERNAL_SEARCH_FILE_LIMIT));
+     SetDlgItemText(IDC_EXT_LABEL_RESPONSE_LIMIT, CTSTRING(EXTERNAL_SEARCH_RESPONSE_LIMIT));
++    SetDlgItemText(IDC_EXT_GROUP_AMULE, CTSTRING(EXTERNAL_SEARCH_AMULE));
++    SetDlgItemText(IDC_EXT_AMULE_ENABLED, CTSTRING(EXTERNAL_SEARCH_ENABLED));
++    SetDlgItemText(IDC_EXT_LABEL_AMULE_URL, _T("URL:"));
++    SetDlgItemText(IDC_EXT_LABEL_AMULE_PASSWORD, CTSTRING(PASSWORD));
++    SetDlgItemText(IDC_EXT_LABEL_AMULE_MODE, CTSTRING(EXTERNAL_SEARCH_SEARCH_MODE));
++    SetDlgItemText(IDC_EXT_LABEL_AMULE_TIMEOUT, CTSTRING(EXTERNAL_SEARCH_TIMEOUT));
+     SetDlgItemText(IDC_EXT_GROUP_TORZNAB, CTSTRING(EXTERNAL_SEARCH_TORZNAB));
+     SetDlgItemText(IDC_EXT_TORZNAB_ADD, CTSTRING(ADD3));
+     SetDlgItemText(IDC_EXT_TORZNAB_EDIT, CTSTRING(EDIT));
+@@ -108,6 +114,10 @@ LRESULT ExternalSearchSettingsDlg::onInitDialog(UINT, WPARAM, LPARAM, BOOL&)
+     ctrlTorznab.InsertColumn(1, CTSTRING(NAME), LVCFMT_LEFT, 65, 1);
+     ctrlTorznab.InsertColumn(2, _T("URL"), LVCFMT_LEFT, 178, 2);
+ 
++    SendDlgItemMessage(IDC_EXT_AMULE_MODE, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(_T("eD2k local")));
++    SendDlgItemMessage(IDC_EXT_AMULE_MODE, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(_T("eD2k global")));
++    SendDlgItemMessage(IDC_EXT_AMULE_MODE, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(_T("Kad")));
++
+     loadFromManager();
+     loadControls();
+     CenterWindow(GetParent());
+@@ -116,7 +126,7 @@ LRESULT ExternalSearchSettingsDlg::onInitDialog(UINT, WPARAM, LPARAM, BOOL&)
+ 
+ void ExternalSearchSettingsDlg::loadFromManager()
+ {
+-    ExternalSearchManager::getInstance()->getConfig(soulseek, qbittorrent, torznab);
++    ExternalSearchManager::getInstance()->getConfig(soulseek, amule, qbittorrent, torznab);
+ }
+ 
+ void ExternalSearchSettingsDlg::loadControls()
+@@ -128,6 +138,13 @@ void ExternalSearchSettingsDlg::loadControls()
+     SetDlgItemInt(IDC_EXT_SLSK_FILE_LIMIT, soulseek.fileLimit, FALSE);
+     SetDlgItemInt(IDC_EXT_SLSK_RESPONSE_LIMIT, soulseek.responseLimit, FALSE);
+ 
++    CheckDlgButton(IDC_EXT_AMULE_ENABLED, amule.enabled ? BST_CHECKED : BST_UNCHECKED);
++    SetDlgItemText(IDC_EXT_AMULE_URL, Text::toT(amule.baseUrl).c_str());
++    SetDlgItemText(IDC_EXT_AMULE_PASSWORD, Text::toT(amule.password).c_str());
++    int amuleMode = amule.searchType == "local" ? 0 : (amule.searchType == "kad" ? 2 : 1);
++    SendDlgItemMessage(IDC_EXT_AMULE_MODE, CB_SETCURSEL, amuleMode, 0);
++    SetDlgItemInt(IDC_EXT_AMULE_TIMEOUT, amule.searchTimeout, FALSE);
++
+     CheckDlgButton(IDC_EXT_QBT_ENABLED, qbittorrent.enabled ? BST_CHECKED : BST_UNCHECKED);
+     SetDlgItemText(IDC_EXT_QBT_URL, Text::toT(qbittorrent.baseUrl).c_str());
+     SetDlgItemText(IDC_EXT_QBT_APIKEY, Text::toT(qbittorrent.apiKey).c_str());
+@@ -149,6 +166,13 @@ void ExternalSearchSettingsDlg::readControls()
+     soulseek.fileLimit = getPositiveInt(m_hWnd, IDC_EXT_SLSK_FILE_LIMIT, 1000);
+     soulseek.responseLimit = getPositiveInt(m_hWnd, IDC_EXT_SLSK_RESPONSE_LIMIT, 100);
+ 
++    amule.enabled = IsDlgButtonChecked(IDC_EXT_AMULE_ENABLED) == BST_CHECKED;
++    WinUtil::getWindowText(GetDlgItem(IDC_EXT_AMULE_URL), value); boost::trim(value); amule.baseUrl = Text::fromT(value);
++    WinUtil::getWindowText(GetDlgItem(IDC_EXT_AMULE_PASSWORD), value); amule.password = Text::fromT(value);
++    const int amuleMode = static_cast<int>(SendDlgItemMessage(IDC_EXT_AMULE_MODE, CB_GETCURSEL, 0, 0));
++    amule.searchType = amuleMode == 0 ? "local" : (amuleMode == 2 ? "kad" : "global");
++    amule.searchTimeout = getPositiveInt(m_hWnd, IDC_EXT_AMULE_TIMEOUT, 60);
++
+     qbittorrent.enabled = IsDlgButtonChecked(IDC_EXT_QBT_ENABLED) == BST_CHECKED;
+     WinUtil::getWindowText(GetDlgItem(IDC_EXT_QBT_URL), value); boost::trim(value); qbittorrent.baseUrl = Text::fromT(value);
+     WinUtil::getWindowText(GetDlgItem(IDC_EXT_QBT_APIKEY), value); boost::trim(value); qbittorrent.apiKey = Text::fromT(value);
+@@ -248,12 +272,27 @@ LRESULT ExternalSearchSettingsDlg::onOK(WORD, WORD, HWND, BOOL&)
+         MessageBox(CTSTRING(EXTERNAL_SEARCH_SOULSEEK_URL_REQUIRED), CTSTRING(EXTERNAL_SEARCH_SETTINGS), MB_OK | MB_ICONWARNING);
+         return 0;
+     }
++    if (amule.enabled && amule.baseUrl.empty())
++    {
++        MessageBox(CTSTRING(EXTERNAL_SEARCH_AMULE_URL_REQUIRED), CTSTRING(EXTERNAL_SEARCH_SETTINGS), MB_OK | MB_ICONWARNING);
++        return 0;
++    }
++    if (amule.enabled && amule.password.empty())
++    {
++        MessageBox(CTSTRING(EXTERNAL_SEARCH_AMULE_PASSWORD_REQUIRED), CTSTRING(EXTERNAL_SEARCH_SETTINGS), MB_OK | MB_ICONWARNING);
++        return 0;
++    }
++    if (amule.enabled && !ExternalSearchManager::isSafeAmuleUrl(amule.baseUrl))
++    {
++        MessageBox(CTSTRING(EXTERNAL_SEARCH_AMULE_INSECURE_URL), CTSTRING(EXTERNAL_SEARCH_SETTINGS), MB_OK | MB_ICONWARNING);
++        return 0;
++    }
+     if (qbittorrent.enabled && qbittorrent.baseUrl.empty())
+     {
+         MessageBox(CTSTRING(EXTERNAL_SEARCH_QBITTORRENT_URL_REQUIRED), CTSTRING(EXTERNAL_SEARCH_SETTINGS), MB_OK | MB_ICONWARNING);
+         return 0;
+     }
+-    if (!ExternalSearchManager::getInstance()->saveConfig(soulseek, qbittorrent, torznab))
++    if (!ExternalSearchManager::getInstance()->saveConfig(soulseek, amule, qbittorrent, torznab))
+     {
+         MessageBox(CTSTRING(EXTERNAL_SEARCH_CONFIG_SAVE_FAILED), CTSTRING(EXTERNAL_SEARCH_SETTINGS), MB_OK | MB_ICONERROR);
+         return 0;
+diff --git a/windows/ExternalSearchSettingsDlg.h b/windows/ExternalSearchSettingsDlg.h
+index 7cc234b..92aaf8b 100644
+--- a/windows/ExternalSearchSettingsDlg.h
++++ b/windows/ExternalSearchSettingsDlg.h
+@@ -35,6 +35,7 @@ public:
+ 
+ private:
+     ExternalSearchManager::SoulseekConfig soulseek;
++    ExternalSearchManager::AmuleConfig amule;
+     ExternalSearchManager::QbittorrentConfig qbittorrent;
+     std::vector<ExternalSearchManager::TorznabSource> torznab;
+     CListViewCtrl ctrlTorznab;
+diff --git a/windows/SearchFrm.cpp b/windows/SearchFrm.cpp
+index 21265cf..b9f0147 100644
+--- a/windows/SearchFrm.cpp
++++ b/windows/SearchFrm.cpp
+@@ -1219,6 +1219,11 @@ const tstring& SearchFrame::SearchInfo::getText(uint8_t col) const
+ 				}
+ 				else if (externalResult.network == ExternalSearch::NETWORK_BITTORRENT)
+ 					columns[col] = _T("S:") + Util::toStringT(externalResult.seeders) + _T(" L:") + Util::toStringT(externalResult.leechers);
++				else if (externalResult.network == ExternalSearch::NETWORK_ED2K)
++				{
++					columns[col] = _T("S:") + Util::toStringT(externalResult.sourceCount);
++					if (externalResult.completeSourceCount > 0) columns[col] += _T(" C:") + Util::toStringT(externalResult.completeSourceCount);
++				}
+ 				break;
+ 			case COLUMN_HUB:
+ 				columns[col] = Text::toT(externalResult.networkName);
+diff --git a/windows/resource.h b/windows/resource.h
+index 1f66ef8..f979f84 100644
+--- a/windows/resource.h
++++ b/windows/resource.h
+@@ -1226,6 +1226,16 @@
+ #define IDC_EXT_LABEL_TZ_NAME            8339
+ #define IDC_EXT_LABEL_TZ_URL             8340
+ #define IDC_EXT_LABEL_TZ_APIKEY          8341
++#define IDC_EXT_GROUP_AMULE              8342
++#define IDC_EXT_AMULE_ENABLED            8343
++#define IDC_EXT_LABEL_AMULE_URL          8344
++#define IDC_EXT_AMULE_URL                8345
++#define IDC_EXT_LABEL_AMULE_PASSWORD     8346
++#define IDC_EXT_AMULE_PASSWORD           8347
++#define IDC_EXT_LABEL_AMULE_MODE         8348
++#define IDC_EXT_AMULE_MODE               8349
++#define IDC_EXT_LABEL_AMULE_TIMEOUT      8350
++#define IDC_EXT_AMULE_TIMEOUT            8351
+ #define ID_SHELLCONTEXTMENU_MIN         28000
+ #define ID_SHELLCONTEXTMENU_MAX         29000
+ #define ID_UNUSED                       32770
+@@ -1248,7 +1258,7 @@
+ #define _APS_3D_CONTROLS                     1
+ #define _APS_NEXT_RESOURCE_VALUE        371
+ #define _APS_NEXT_COMMAND_VALUE         7613
+-#define _APS_NEXT_CONTROL_VALUE         8342
++#define _APS_NEXT_CONTROL_VALUE         8352
+ #define _APS_NEXT_SYMED_VALUE           2423
+ #endif
+ #endif
+diff --git a/windows/resources.rc b/windows/resources.rc
+index bd2f608..9d78ea2 100644
+--- a/windows/resources.rc
++++ b/windows/resources.rc
+@@ -1031,7 +1031,7 @@ END
+ 
+ 
+ 
+-IDD_EXTERNAL_SEARCH_SETTINGS DIALOGEX 0, 0, 410, 294
++IDD_EXTERNAL_SEARCH_SETTINGS DIALOGEX 0, 0, 410, 353
+ STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
+ CAPTION "External Search settings"
+ FONT 8, "MS Shell Dlg", 0, 0, 0x0
+@@ -1049,31 +1049,42 @@ BEGIN
+     LTEXT           "Response limit:",IDC_EXT_LABEL_RESPONSE_LIMIT,199,52,58,8
+     EDITTEXT        IDC_EXT_SLSK_RESPONSE_LIMIT,260,49,46,14,ES_AUTOHSCROLL | ES_NUMBER
+ 
+-    GROUPBOX        "BitTorrent search / Torznab",IDC_EXT_GROUP_TORZNAB,6,77,398,94
+-    CONTROL         "",IDC_EXT_TORZNAB_LIST,"SysListView32",LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP,13,89,314,73
+-    PUSHBUTTON      "Add...",IDC_EXT_TORZNAB_ADD,334,89,63,14
+-    PUSHBUTTON      "Edit...",IDC_EXT_TORZNAB_EDIT,334,107,63,14
+-    PUSHBUTTON      "Remove",IDC_EXT_TORZNAB_REMOVE,334,125,63,14
+-
+-    GROUPBOX        "BitTorrent downloads / qBittorrent",IDC_EXT_GROUP_QBT,6,174,398,82
+-    CONTROL         "Enabled",IDC_EXT_QBT_ENABLED,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,13,185,48,10
+-    LTEXT           "URL:",IDC_EXT_LABEL_QBT_URL,13,201,24,8
+-    EDITTEXT        IDC_EXT_QBT_URL,42,198,159,14,ES_AUTOHSCROLL
+-    LTEXT           "API key:",IDC_EXT_LABEL_QBT_APIKEY,207,201,36,8
+-    EDITTEXT        IDC_EXT_QBT_APIKEY,246,198,151,14,ES_AUTOHSCROLL | ES_PASSWORD
+-    LTEXT           "User:",IDC_EXT_LABEL_QBT_USER,13,220,25,8
+-    EDITTEXT        IDC_EXT_QBT_USERNAME,42,217,76,14,ES_AUTOHSCROLL
+-    LTEXT           "Password:",IDC_EXT_LABEL_QBT_PASSWORD,124,220,42,8
+-    EDITTEXT        IDC_EXT_QBT_PASSWORD,169,217,73,14,ES_AUTOHSCROLL | ES_PASSWORD
+-    LTEXT           "Save path:",IDC_EXT_LABEL_QBT_SAVEPATH,248,220,42,8
+-    EDITTEXT        IDC_EXT_QBT_SAVEPATH,293,217,104,14,ES_AUTOHSCROLL
+-    LTEXT           "Category:",IDC_EXT_LABEL_QBT_CATEGORY,13,239,39,8
+-    EDITTEXT        IDC_EXT_QBT_CATEGORY,55,236,100,14,ES_AUTOHSCROLL
+-
+-    LTEXT           "",IDC_EXT_CONFIG_PATH,8,265,278,18,SS_NOPREFIX
+-    PUSHBUTTON      "Reload",IDC_EXT_RELOAD,291,265,52,14
+-    DEFPUSHBUTTON   "OK",IDOK,347,265,50,14
+-    PUSHBUTTON      "Cancel",IDCANCEL,347,281,50,14
++    GROUPBOX        "eD2k / Kad (aMule)",IDC_EXT_GROUP_AMULE,6,77,398,56
++    CONTROL         "Enabled",IDC_EXT_AMULE_ENABLED,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,13,88,48,10
++    LTEXT           "URL:",IDC_EXT_LABEL_AMULE_URL,13,104,24,8
++    EDITTEXT        IDC_EXT_AMULE_URL,42,101,177,14,ES_AUTOHSCROLL
++    LTEXT           "Password:",IDC_EXT_LABEL_AMULE_PASSWORD,226,104,42,8
++    EDITTEXT        IDC_EXT_AMULE_PASSWORD,271,101,126,14,ES_AUTOHSCROLL | ES_PASSWORD
++    LTEXT           "Search mode:",IDC_EXT_LABEL_AMULE_MODE,13,122,45,8
++    COMBOBOX        IDC_EXT_AMULE_MODE,61,119,85,60,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
++    LTEXT           "Timeout:",IDC_EXT_LABEL_AMULE_TIMEOUT,159,122,37,8
++    EDITTEXT        IDC_EXT_AMULE_TIMEOUT,199,119,38,14,ES_AUTOHSCROLL | ES_NUMBER
++
++    GROUPBOX        "BitTorrent search / Torznab",IDC_EXT_GROUP_TORZNAB,6,136,398,94
++    CONTROL         "",IDC_EXT_TORZNAB_LIST,"SysListView32",LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP,13,148,314,73
++    PUSHBUTTON      "Add...",IDC_EXT_TORZNAB_ADD,334,148,63,14
++    PUSHBUTTON      "Edit...",IDC_EXT_TORZNAB_EDIT,334,166,63,14
++    PUSHBUTTON      "Remove",IDC_EXT_TORZNAB_REMOVE,334,184,63,14
++
++    GROUPBOX        "BitTorrent downloads / qBittorrent",IDC_EXT_GROUP_QBT,6,233,398,82
++    CONTROL         "Enabled",IDC_EXT_QBT_ENABLED,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,13,244,48,10
++    LTEXT           "URL:",IDC_EXT_LABEL_QBT_URL,13,260,24,8
++    EDITTEXT        IDC_EXT_QBT_URL,42,257,159,14,ES_AUTOHSCROLL
++    LTEXT           "API key:",IDC_EXT_LABEL_QBT_APIKEY,207,260,36,8
++    EDITTEXT        IDC_EXT_QBT_APIKEY,246,257,151,14,ES_AUTOHSCROLL | ES_PASSWORD
++    LTEXT           "User:",IDC_EXT_LABEL_QBT_USER,13,279,25,8
++    EDITTEXT        IDC_EXT_QBT_USERNAME,42,276,76,14,ES_AUTOHSCROLL
++    LTEXT           "Password:",IDC_EXT_LABEL_QBT_PASSWORD,124,279,42,8
++    EDITTEXT        IDC_EXT_QBT_PASSWORD,169,276,73,14,ES_AUTOHSCROLL | ES_PASSWORD
++    LTEXT           "Save path:",IDC_EXT_LABEL_QBT_SAVEPATH,248,279,42,8
++    EDITTEXT        IDC_EXT_QBT_SAVEPATH,293,276,104,14,ES_AUTOHSCROLL
++    LTEXT           "Category:",IDC_EXT_LABEL_QBT_CATEGORY,13,298,39,8
++    EDITTEXT        IDC_EXT_QBT_CATEGORY,55,295,100,14,ES_AUTOHSCROLL
++
++    LTEXT           "",IDC_EXT_CONFIG_PATH,8,324,278,18,SS_NOPREFIX
++    PUSHBUTTON      "Reload",IDC_EXT_RELOAD,291,324,52,14
++    DEFPUSHBUTTON   "OK",IDOK,347,324,50,14
++    PUSHBUTTON      "Cancel",IDCANCEL,347,340,50,14
+ END
+ 
+ IDD_EXTERNAL_SEARCH_TORZNAB DIALOGEX 0, 0, 320, 112
