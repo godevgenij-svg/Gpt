@@ -1,0 +1,81 @@
+name: Diagnose backend runtime
+
+on:
+  push:
+    branches: [ backend-pack-ready ]
+    paths:
+      - '.github/workflows/diag-backend-runtime.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Diagnose qBittorrent and aMule
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'
+          $tmp=Join-Path $env:RUNNER_TEMP ('diag-'+[guid]::NewGuid().ToString('N'));New-Item -ItemType Directory $tmp -Force|Out-Null
+          function WaitPort($p,$s=25){$end=(Get-Date).AddSeconds($s);while((Get-Date)-lt$end){$c=New-Object Net.Sockets.TcpClient;try{$a=$c.BeginConnect('127.0.0.1',$p,$null,$null);if($a.AsyncWaitHandle.WaitOne(500)-and$c.Connected){$c.EndConnect($a);return $true}}catch{}finally{$c.Close()};Start-Sleep -Milliseconds 300};$false}
+          try {
+            # qBittorrent official installer -> exact installed runtime tree
+            $q=Join-Path $tmp qb.exe;& curl.exe -fL 'https://github.com/qbittorrent/qBittorrent/releases/download/release-5.2.3/qbittorrent_5.2.3_x64_setup.exe' -o $q;if($LASTEXITCODE){throw 'qB download failed'}
+            $qd=Join-Path $tmp qBittorrent;$p=Start-Process $q -ArgumentList @('/S',"/D=$qd") -Wait -PassThru;if($p.ExitCode-ne0){throw "qB install $($p.ExitCode)"}
+            $profile=Join-Path $tmp qbprofile;$conf=Join-Path $profile 'qBittorrent\config';New-Item -ItemType Directory $conf -Force|Out-Null
+            @"
+          [LegalNotice]
+          Accepted=true
+
+          [Preferences]
+          WebUI\Enabled=true
+          WebUI\Address=127.0.0.1
+          WebUI\Port=8080
+          WebUI\HTTPS\Enabled=false
+          WebUI\LocalHostAuth=false
+          WebUI\Username=blacklink
+          WebUI\Password_PBKDF2="@ByteArray(+nqIve0kGenX6Anl3N+SPA==:Lyx2vXZFlnU2k+27EvmMHddocLMRcNuu4+1/T6gojxcekfxUH0wxr51rKwKc/KpdNMGZe/4WpH0dtKBi9LzhaQ==)"
+          WebUI\CSRFProtection=true
+          WebUI\HostHeaderValidation=true
+          WebUI\ClickjackingProtection=true
+          WebUI\UseUPnP=false
+          "@ | Set-Content (Join-Path $conf qBittorrent.ini) -Encoding UTF8
+            $qx=Join-Path $qd qbittorrent.exe;$qp=Start-Process $qx -ArgumentList @("--profile=$profile",'--confirm-legal-notice','--no-splash','--webui-port=8080') -PassThru
+            $qok=WaitPort 8080 30;Write-Host "QBIT_PORT=$qok PID=$($qp.Id) EXITED=$($qp.HasExited)"
+            Get-Content (Join-Path $conf qBittorrent.ini)|Out-Host
+            if($qok){try{(Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:8080/api/v2/app/version' -TimeoutSec 5).Content|Write-Host}catch{Write-Host $_}}
+
+            # aMule official pinned artifact
+            $az=Join-Path $tmp am.zip;& curl.exe -fL 'https://nightly.link/amule-org/amule/actions/artifacts/9246296823.zip' -o $az;if($LASTEXITCODE){throw 'amule download failed'};$ao=Join-Path $tmp ao;Expand-Archive $az $ao -Force;$inner=Get-ChildItem $ao -Recurse -File -Filter '*Windows-x64*.zip'|Select-Object -First 1;$ad=Join-Path $tmp aMule;Expand-Archive $inner.FullName $ad -Force;$bin=(Get-ChildItem $ad -Recurse -File -Filter amuleapi.exe|Select-Object -First 1).Directory.FullName
+            $ac=Join-Path $tmp amcfg;New-Item -ItemType Directory $ac -Force|Out-Null
+            @"
+          [AmuleApi]
+          Enabled=1
+          BindAddress=127.0.0.1
+          HttpPort=4713
+          Path=$(Join-Path $bin amuleapi.exe)
+
+          [eMule]
+          FirstRunWizardDone=1
+          "@ | Set-Content (Join-Path $ac amule.conf) -Encoding UTF8
+            & (Join-Path $bin amuleapi.exe) "--config-dir=$ac" '--set-admin-pass=diagpassword';Write-Host "amuleapi setpass exit=$LASTEXITCODE"
+
+            $out=Join-Path $ac amuled.out.log;$err=Join-Path $ac amuled.err.log
+            $dp=Start-Process (Join-Path $bin amuled.exe) -ArgumentList @("--config-dir=$ac") -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
+            $dok=WaitPort 4713 25;Write-Host "AMULED_API_PORT=$dok PID=$($dp.Id) EXITED=$($dp.HasExited) EXITCODE=$(if($dp.HasExited){$dp.ExitCode}else{'running'})"
+            if(Test-Path $out){Write-Host '--- amuled stdout';Get-Content $out -Tail 200|Out-Host};if(Test-Path $err){Write-Host '--- amuled stderr';Get-Content $err -Tail 200|Out-Host};if(Test-Path (Join-Path $ac amuleapi.log)){Write-Host '--- amuleapi log';Get-Content (Join-Path $ac amuleapi.log) -Tail 200|Out-Host}
+            Get-Content (Join-Path $ac amule.conf)|Out-Host
+            if(-not$dok){
+              if(-not$dp.HasExited){Stop-Process $dp.Id -Force -ErrorAction SilentlyContinue}
+              $go=Join-Path $ac amule.out.log;$ge=Join-Path $ac amule.err.log
+              $gp=Start-Process (Join-Path $bin amule.exe) -ArgumentList @("--config-dir=$ac") -RedirectStandardOutput $go -RedirectStandardError $ge -PassThru
+              $gok=WaitPort 4713 25;Write-Host "AMULE_GUI_API_PORT=$gok PID=$($gp.Id) EXITED=$($gp.HasExited)"
+              if(Test-Path $go){Write-Host '--- amule stdout';Get-Content $go -Tail 200|Out-Host};if(Test-Path $ge){Write-Host '--- amule stderr';Get-Content $ge -Tail 200|Out-Host};if(Test-Path (Join-Path $ac amuleapi.log)){Write-Host '--- amuleapi log after GUI';Get-Content (Join-Path $ac amuleapi.log) -Tail 200|Out-Host}
+            }
+          } finally {
+            Get-Process -ErrorAction SilentlyContinue|Where-Object{$_.ProcessName-match'qbittorrent|amule|amuleapi'}|Stop-Process -Force -ErrorAction SilentlyContinue
+          }
