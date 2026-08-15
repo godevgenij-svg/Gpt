@@ -70,85 +70,86 @@ jobs:
           }
           if ($bad.Count -gt 0) { throw ("Unsafe StringDefs lines for MakeDefs:`n" + ($bad -join "`n")) }
 
-      - name: Setup MSBuild
+      - name: Setup MSBuild x64
         uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
 
-      - name: Ensure BlackLink VS2019 build prerequisites
-        timeout-minutes: 20
+      - name: Preflight preinstalled VS2022 toolchain
         shell: pwsh
         run: |
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $setup = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
           if (-not (Test-Path $vswhere)) { throw "vswhere.exe not found" }
-          if (-not (Test-Path $setup)) { throw "Visual Studio setup.exe not found" }
           $vsPath = (& $vswhere -latest -products * -property installationPath).Trim()
           if (-not $vsPath) { throw "Visual Studio installation not found" }
 
-          function Find-V142Cl {
-            Get-ChildItem -Path "$vsPath\VC\Tools\MSVC" -Filter cl.exe -Recurse -ErrorAction SilentlyContinue |
-              Where-Object { $_.FullName -match '\\14\.29[^\\]*\\bin\\Hostx64\\x64\\cl\.exe$' } |
-              Select-Object -First 1
-          }
-          function Find-V142Atl {
-            Get-ChildItem -Path "$vsPath\VC\Tools\MSVC" -Filter atlbase.h -Recurse -ErrorAction SilentlyContinue |
-              Where-Object { $_.FullName -match '\\14\.29[^\\]*\\atlmfc\\include\\atlbase\.h$' } |
-              Select-Object -First 1
-          }
-          function Find-Win10SdkFile([string]$name, [string]$subtree) {
-            $root = "${env:ProgramFiles(x86)}\Windows Kits\10\$subtree"
-            if (-not (Test-Path $root)) { return $null }
-            Get-ChildItem -Path $root -Filter $name -Recurse -ErrorAction SilentlyContinue |
-              Where-Object { $_.FullName -match '\\10\.0\.19041\.0\\' } |
-              Select-Object -First 1
-          }
+          $toolRoot = Get-ChildItem "$vsPath\VC\Tools\MSVC" -Directory -ErrorAction Stop |
+            Sort-Object Name -Descending |
+            Where-Object {
+              (Test-Path (Join-Path $_.FullName 'bin\Hostx64\x64\cl.exe')) -and
+              (Test-Path (Join-Path $_.FullName 'atlmfc\include\atlbase.h'))
+            } |
+            Select-Object -First 1
+          if (-not $toolRoot) { throw "Preinstalled v143 compiler/ATL pair not found" }
 
-          $cl = Find-V142Cl
-          $atl = Find-V142Atl
-          $windowsH = Find-Win10SdkFile 'Windows.h' 'Include'
-          $rc = Find-Win10SdkFile 'rc.exe' 'bin'
-          $mt = Find-Win10SdkFile 'mt.exe' 'bin'
-
-          if (-not $cl -or -not $atl -or -not $windowsH -or -not $rc -or -not $mt) {
-            Write-Host "Installing complete BlackLink prerequisite set into $vsPath"
-            $args = @(
-              'modify',
-              '--installPath', "`"$vsPath`"",
-              '--add', 'Microsoft.VisualStudio.ComponentGroup.VC.Tools.142.x86.x64',
-              '--add', 'Microsoft.VisualStudio.Component.VC.14.29.16.11.ATL',
-              '--add', 'Microsoft.VisualStudio.Component.Windows10SDK.19041',
-              '--quiet', '--norestart'
-            )
-            $p = Start-Process -FilePath $setup -ArgumentList $args -Wait -PassThru
-            if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "Visual Studio Installer failed with exit code $($p.ExitCode)" }
-          }
-
-          $cl = Find-V142Cl
-          $atl = Find-V142Atl
-          $windowsH = Find-Win10SdkFile 'Windows.h' 'Include'
-          $rc = Find-Win10SdkFile 'rc.exe' 'bin'
-          $mt = Find-Win10SdkFile 'mt.exe' 'bin'
+          $sdkRoot = "${env:ProgramFiles(x86)}\Windows Kits\10"
+          $windowsH = Join-Path $sdkRoot 'Include\10.0.19041.0\um\Windows.h'
+          $rc = Join-Path $sdkRoot 'bin\10.0.19041.0\x64\rc.exe'
+          $mt = Join-Path $sdkRoot 'bin\10.0.19041.0\x64\mt.exe'
+          $cl = Join-Path $toolRoot.FullName 'bin\Hostx64\x64\cl.exe'
+          $atl = Join-Path $toolRoot.FullName 'atlmfc\include\atlbase.h'
           $msbuild = Get-Command msbuild -ErrorAction SilentlyContinue
 
-          if (-not $msbuild) { throw "MSBuild is missing after setup" }
-          if (-not $cl) { throw "MSVC v142 x64 compiler cl.exe is missing" }
-          if (-not $atl) { throw "v142 ATL atlbase.h is missing" }
-          if (-not $windowsH) { throw "Windows 10 SDK 19041 Windows.h is missing" }
-          if (-not $rc) { throw "Windows 10 SDK 19041 rc.exe is missing" }
-          if (-not $mt) { throw "Windows 10 SDK 19041 mt.exe is missing" }
-
+          if (-not $msbuild) { throw "MSBuild missing" }
+          foreach ($required in @($cl, $atl, $windowsH, $rc, $mt)) {
+            if (-not (Test-Path $required)) { throw "Required build file missing: $required" }
+          }
           Write-Host "MSBuild: $($msbuild.Source)"
-          Write-Host "v142 cl.exe: $($cl.FullName)"
-          Write-Host "v142 ATL: $($atl.FullName)"
-          Write-Host "Windows SDK Windows.h: $($windowsH.FullName)"
-          Write-Host "Windows SDK rc.exe: $($rc.FullName)"
-          Write-Host "Windows SDK mt.exe: $($mt.FullName)"
+          Write-Host "MSVC/ATL root: $($toolRoot.FullName)"
+          Write-Host "Windows SDK: 10.0.19041.0"
+          Write-Host "No Visual Studio installation step is used."
 
-      - name: Build Release x64
-        timeout-minutes: 30
+      - name: Build Release x64 with watchdog
+        timeout-minutes: 20
         shell: pwsh
         run: |
-          msbuild blacklink\blacklink_2019.sln /m /t:Build /p:Configuration=Release /p:Platform=x64 /verbosity:normal /fl /flp:"logfile=msbuild.log;verbosity=diagnostic"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $msbuild = (Get-Command msbuild -ErrorAction Stop).Source
+          $log = Join-Path $PWD 'msbuild.log'
+          if (Test-Path $log) { Remove-Item $log -Force }
+          $args = @(
+            'blacklink\blacklink_2019.sln',
+            '/m',
+            '/t:Build',
+            '/p:Configuration=Release',
+            '/p:Platform=x64',
+            '/p:PlatformToolset=v143',
+            '/verbosity:normal',
+            '/fl',
+            "/flp:logfile=$log;verbosity=diagnostic"
+          )
+          Write-Host "Starting MSBuild with v143 override and 4-minute no-progress watchdog"
+          $p = Start-Process -FilePath $msbuild -ArgumentList $args -PassThru -NoNewWindow
+          $lastProgress = Get-Date
+          $lastLength = -1L
+          while (-not $p.HasExited) {
+            Start-Sleep -Seconds 15
+            $p.Refresh()
+            if (Test-Path $log) {
+              $item = Get-Item $log
+              if ($item.Length -ne $lastLength) {
+                $lastLength = $item.Length
+                $lastProgress = Get-Date
+                Write-Host ("MSBuild progress: log {0:N0} bytes" -f $lastLength)
+              }
+            }
+            if (((Get-Date) - $lastProgress).TotalSeconds -ge 240) {
+              Write-Host "MSBuild log has not changed for 240 seconds. Killing process tree."
+              cmd /c "taskkill /PID $($p.Id) /T /F" | Out-Host
+              throw "MSBuild watchdog: no progress for 4 minutes"
+            }
+          }
+          $p.WaitForExit()
+          if ($p.ExitCode -ne 0) { throw "MSBuild failed with exit code $($p.ExitCode)" }
 
       - name: Upload MSBuild diagnostic log
         if: always()
