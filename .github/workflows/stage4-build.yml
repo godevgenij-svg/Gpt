@@ -1,0 +1,187 @@
+name: Stage 4 clean x64 build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ stage4-ed2k-from-stage3 ]
+    paths:
+      - 'stage4/new/Stage4.patch'
+      - '.github/workflows/stage4-build.yml'
+
+concurrency:
+  group: stage4-clean-x64-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout Stage 4 branch
+        uses: actions/checkout@v4
+        with:
+          ref: stage4-ed2k-from-stage3
+
+      - name: Reconstruct exact Stage 3
+        shell: pwsh
+        run: ./stage4/reconstruct_stage3.ps1
+
+      - name: Apply only standalone Stage 4 patch
+        shell: pwsh
+        run: |
+          if (-not (Test-Path 'stage4/new/Stage4.patch')) { throw 'Standalone Stage 4 patch missing' }
+          git -C blacklink apply --check ../stage4/new/Stage4.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C blacklink apply ../stage4/new/Stage4.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C blacklink diff --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $expected = @(Get-Content stage4/new/CHANGED_FILES.txt | Where-Object { $_.Trim() })
+          $actual = @(git -C blacklink diff --name-only HEAD)
+          if (($expected -join "`n") -ne ($actual -join "`n")) { throw 'Stage 4 changed-file set mismatch' }
+
+      - name: Validate Stage 4 source invariants
+        shell: pwsh
+        run: |
+          $manager = Get-Content 'blacklink/client/ExternalSearchManager.cpp' -Raw
+          $header = Get-Content 'blacklink/client/ExternalSearchManager.h' -Raw
+          $result = Get-Content 'blacklink/client/ExternalSearchResult.h' -Raw
+          foreach ($required in @('REQ_AMULE_LOGIN','resumeAmuleAction','/api/v0/search/stop','/api/v0/search/results?search_id=','"ecid"','backendId')) {
+            if (-not (($manager + $header + $result).Contains($required))) { throw "Missing Stage 4 invariant: $required" }
+          }
+          foreach ($forbidden in @('REQ_AMULE_LOGIN_SEARCH','REQ_AMULE_LOGIN_DOWNLOAD','startAmuleLoginForSearch','startAmuleLoginForDownload')) {
+            if (($manager + $header).Contains($forbidden)) { throw "Stale Stage 4 auth symbol: $forbidden" }
+          }
+          $changed = @(git -C blacklink diff --name-only HEAD)
+          $native = @($changed | Where-Object { $_ -match '(^|/)(Nmdc|Adc|ClientManager|SearchManager|QueueManager)\.' })
+          if ($native.Count -ne 0) { throw "Native DC core changed: $($native -join ', ')" }
+
+      - name: Validate StringDefs for MakeDefs
+        shell: pwsh
+        run: |
+          $path = 'blacklink/client/StringDefs.h'
+          $lines = Get-Content $path
+          $bad = @()
+          for ($i = 0; $i -lt $lines.Count; $i++) {
+            $line = $lines[$i]
+            if ($line.Length -lt 5) { continue }
+            if ($line.Contains('// @Strings: ') -or $line.Contains('// @Names: ') -or $line.Contains('// @DontAdd') -or $line.Contains('// @Prolog: ')) { continue }
+            if (-not $line.Contains(',')) { $bad += "line $($i + 1): $line" }
+          }
+          if ($bad.Count -gt 0) { throw ("Unsafe StringDefs lines:`n" + ($bad -join "`n")) }
+
+      - name: Install complete Russian localization with Stage 4 keys
+        shell: pwsh
+        run: |
+          $parts = Get-ChildItem 'patches/ru3.part*' | Sort-Object Name
+          if ($parts.Count -ne 10) { throw "Expected 10 localization chunks, found $($parts.Count)" }
+          $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+          if ($b64.Length -ne 49052) { throw "Unexpected localization base64 length: $($b64.Length)" }
+          [IO.File]::WriteAllBytes("$PWD\ru-RU.xml.xz", [Convert]::FromBase64String($b64))
+          if ((Get-FileHash "$PWD\ru-RU.xml.xz" -Algorithm SHA256).Hash.ToLowerInvariant() -ne '6f166a6f7b9c851eed35067a709b077cb380973258799e4b60616948a1691aab') { throw 'Localization XZ hash mismatch' }
+          New-Item -ItemType Directory -Force 'blacklink/compiled/Lang' | Out-Null
+          cmd /c "7z x ru-RU.xml.xz -so > blacklink\compiled\Lang\ru-RU.xml"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ((Get-FileHash 'blacklink/compiled/Lang/ru-RU.xml' -Algorithm SHA256).Hash.ToLowerInvariant() -ne '46a333b6096be695b0f35d30cc99dfc028398739459705c5aad96123c2f5a6c8') { throw 'Base localization hash mismatch' }
+          $langPath = (Resolve-Path 'blacklink/compiled/Lang/ru-RU.xml')
+          $text = [IO.File]::ReadAllText($langPath, [Text.Encoding]::UTF8)
+          $text = $text.Replace('Revision="4-sharp"', 'Revision="5-sharp"')
+          $marker = "`t</Strings>`n</Language>"
+          if (-not $text.Contains($marker)) { throw 'Localization closing marker not found' }
+          $insert = @(
+            "`t`t<String Name=`"ExternalSearchAmule`">eD2k / Kad (aMule)</String>",
+            "`t`t<String Name=`"ExternalSearchSearchMode`">Режим поиска</String>",
+            "`t`t<String Name=`"ExternalSearchAmuleUrlRequired`">aMule включён, но URL amuleapi не задан.</String>",
+            "`t`t<String Name=`"ExternalSearchAmulePasswordRequired`">aMule включён, но пароль администратора amuleapi не задан.</String>",
+            "`t`t<String Name=`"ExternalSearchAmuleInsecureUrl`">Удалённый amuleapi требует HTTPS. Обычный HTTP разрешён только для localhost.</String>"
+          ) -join "`n"
+          $text = $text.Replace($marker, $insert + "`n" + $marker)
+          [IO.File]::WriteAllText($langPath, $text, [Text.UTF8Encoding]::new($false))
+          [xml]$xml = Get-Content $langPath -Raw -Encoding UTF8
+          $nodes = @($xml.Language.Strings.String)
+          if ($nodes.Count -ne 2021) { throw "Expected 2021 strings, got $($nodes.Count)" }
+          if (@($nodes | ForEach-Object { $_.Name } | Sort-Object -Unique).Count -ne 2021) { throw 'Localization contains duplicate names' }
+          foreach ($name in @('ExternalSearchSources','ExternalSearchAmule','ExternalSearchSearchMode','ExternalSearchAmuleUrlRequired','ExternalSearchAmulePasswordRequired','ExternalSearchAmuleInsecureUrl')) {
+            if (-not ($nodes | Where-Object { $_.Name -eq $name })) { throw "Localization key missing: $name" }
+          }
+
+      - name: Validate Stage 4 runtime defaults
+        shell: pwsh
+        run: |
+          [xml]$cfg = Get-Content 'blacklink/compiled/Settings/ExternalSearch.xml' -Raw -Encoding UTF8
+          if ($cfg.ExternalSearch.Version -ne '4') { throw "Unexpected config version: $($cfg.ExternalSearch.Version)" }
+          if (-not $cfg.ExternalSearch.Amule) { throw 'Amule section missing' }
+          if ($cfg.ExternalSearch.Amule.BaseUrl -ne 'http://127.0.0.1:4713') { throw 'Unexpected amuleapi default URL' }
+          if ($cfg.ExternalSearch.Amule.SearchType -ne 'global') { throw 'Unexpected aMule default search mode' }
+          if ($cfg.ExternalSearch.Amule.ResultLimit -ne '1000') { throw 'Unexpected aMule result limit' }
+
+      - name: Setup MSBuild x64
+        uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
+
+      - name: Preflight VS2022 toolchain
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw 'vswhere.exe not found' }
+          $vsPath = (& $vswhere -latest -products * -property installationPath).Trim()
+          if (-not $vsPath) { throw 'Visual Studio installation not found' }
+          $toolRoot = Get-ChildItem "$vsPath\VC\Tools\MSVC" -Directory -ErrorAction Stop | Sort-Object Name -Descending | Where-Object { (Test-Path (Join-Path $_.FullName 'bin\Hostx64\x64\cl.exe')) -and (Test-Path (Join-Path $_.FullName 'atlmfc\include\atlbase.h')) } | Select-Object -First 1
+          if (-not $toolRoot) { throw 'Preinstalled v143 compiler/ATL pair not found' }
+          $sdkRoot = "${env:ProgramFiles(x86)}\Windows Kits\10"
+          foreach ($required in @((Join-Path $toolRoot.FullName 'bin\Hostx64\x64\cl.exe'),(Join-Path $toolRoot.FullName 'atlmfc\include\atlbase.h'),(Join-Path $sdkRoot 'Include\10.0.19041.0\um\Windows.h'),(Join-Path $sdkRoot 'bin\10.0.19041.0\x64\rc.exe'),(Join-Path $sdkRoot 'bin\10.0.19041.0\x64\mt.exe'))) {
+            if (-not (Test-Path $required)) { throw "Required build file missing: $required" }
+          }
+
+      - name: Build Release x64 with watchdog
+        timeout-minutes: 20
+        shell: pwsh
+        run: |
+          $msbuild = (Get-Command msbuild -ErrorAction Stop).Source
+          $log = Join-Path $PWD 'msbuild-stage4.log'
+          $args = @('blacklink\blacklink_2019.sln','/m','/t:Build','/p:Configuration=Release','/p:Platform=x64','/p:PlatformToolset=v143','/verbosity:normal','/fl',"/flp:logfile=$log;verbosity=diagnostic")
+          $p = Start-Process -FilePath $msbuild -ArgumentList $args -PassThru -NoNewWindow
+          $lastProgress = Get-Date
+          $lastLength = -1L
+          while (-not $p.HasExited) {
+            Start-Sleep -Seconds 15
+            $p.Refresh()
+            if (Test-Path $log) {
+              $item = Get-Item $log
+              if ($item.Length -ne $lastLength) { $lastLength = $item.Length; $lastProgress = Get-Date; Write-Host "MSBuild log: $lastLength bytes" }
+            }
+            if (((Get-Date) - $lastProgress).TotalSeconds -ge 240) { cmd /c "taskkill /PID $($p.Id) /T /F" | Out-Host; throw 'MSBuild watchdog: no progress for 4 minutes' }
+          }
+          $p.WaitForExit()
+          if ($p.ExitCode -ne 0) { throw "MSBuild failed with exit code $($p.ExitCode)" }
+
+      - name: Upload MSBuild log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Stage4-clean-msbuild-log
+          path: msbuild-stage4.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Verify runtime files
+        shell: pwsh
+        run: |
+          foreach ($file in @('blacklink/compiled/blacklink_x64.exe','blacklink/compiled/Lang/ru-RU.xml','blacklink/compiled/Settings/ExternalSearch.xml')) {
+            if (-not (Test-Path $file)) { throw "Required runtime file missing: $file" }
+          }
+          if (Test-Path 'blacklink/compiled/Settings/GreyBridge.xml') { throw 'Legacy GreyBridge.xml must not be packaged' }
+
+      - name: Package clean Stage 4 client
+        shell: pwsh
+        run: |
+          if (Test-Path 'BlackLink-Stage4-eD2k-Kad-x64.zip') { Remove-Item 'BlackLink-Stage4-eD2k-Kad-x64.zip' -Force }
+          Compress-Archive -Path blacklink/compiled/* -DestinationPath 'BlackLink-Stage4-eD2k-Kad-x64.zip' -CompressionLevel Optimal
+          if (-not (Test-Path 'BlackLink-Stage4-eD2k-Kad-x64.zip')) { throw 'Package was not created' }
+
+      - name: Upload client package
+        uses: actions/upload-artifact@v4
+        with:
+          name: BlackLink-Stage4-eD2k-Kad-x64
+          path: BlackLink-Stage4-eD2k-Kad-x64.zip
+          if-no-files-found: error
