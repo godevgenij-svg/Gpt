@@ -1,0 +1,46 @@
+name: Diagnose aMule EC API
+on:
+  push:
+    branches: [ backend-pack-ready ]
+    paths: [ '.github/workflows/diag-amule-ec.yml' ]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  diag:
+    runs-on: windows-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'
+          function WP($p,$s=25){$e=(Get-Date).AddSeconds($s);while((Get-Date)-lt$e){$c=New-Object Net.Sockets.TcpClient;try{$a=$c.BeginConnect('127.0.0.1',$p,$null,$null);if($a.AsyncWaitHandle.WaitOne(500)-and$c.Connected){$c.EndConnect($a);return $true}}catch{}finally{$c.Close()};Start-Sleep -Milliseconds 300};$false}
+          $t=Join-Path $env:RUNNER_TEMP ('amdiag-'+[guid]::NewGuid().ToString('N'));New-Item -ItemType Directory $t -Force|Out-Null
+          $z=Join-Path $t a.zip;&curl.exe -fL 'https://nightly.link/amule-org/amule/actions/artifacts/9246296823.zip' -o $z;$o=Join-Path $t o;Expand-Archive $z $o -Force;$inner=Get-ChildItem $o -Recurse -File -Filter '*Windows-x64*.zip'|Select-Object -First 1;$a=Join-Path $t a;Expand-Archive $inner.FullName $a -Force;$bin=(Get-ChildItem $a -Recurse -File -Filter amuleapi.exe|Select-Object -First 1).Directory.FullName
+          $c=Join-Path $t cfg;New-Item -ItemType Directory $c -Force|Out-Null
+          @"
+          [AmuleApi]
+          Enabled=1
+          BindAddress=127.0.0.1
+          HttpPort=4713
+          Path=$(Join-Path $bin amuleapi.exe)
+
+          [eMule]
+          FirstRunWizardDone=1
+
+          [ExternalConnect]
+          AcceptExternalConnections=1
+          RequireEncryption=0
+          ECAddress=127.0.0.1
+          ECPort=4712
+          ECPassword=
+          "@|Set-Content (Join-Path $c amule.conf) -Encoding UTF8
+          & (Join-Path $bin amuleapi.exe) "--config-dir=$c" '--set-admin-pass=diagpassword'
+          $p=Start-Process (Join-Path $bin amuled.exe) -ArgumentList @("--config-dir=$c") -RedirectStandardOutput (Join-Path $c stdout.txt) -RedirectStandardError (Join-Path $c stderr.txt) -PassThru
+          $ok=WP 4713 30;Start-Sleep 1;Write-Host "API=$ok EXITED=$($p.HasExited) CODE=$(if($p.HasExited){$p.ExitCode}else{'running'})"
+          Write-Host '---STDOUT';if(Test-Path (Join-Path $c stdout.txt)){Get-Content (Join-Path $c stdout.txt)-Tail 200|Out-Host}
+          Write-Host '---STDERR';if(Test-Path (Join-Path $c stderr.txt)){Get-Content (Join-Path $c stderr.txt)-Tail 200|Out-Host}
+          Write-Host '---MAINLOG';if(Test-Path (Join-Path $c logfile)){Get-Content (Join-Path $c logfile)-Tail 200|Out-Host}
+          Write-Host '---APILOG';if(Test-Path (Join-Path $c amuleapi.log)){Get-Content (Join-Path $c amuleapi.log)-Tail 200|Out-Host}
+          Get-Process -ErrorAction SilentlyContinue|Where-Object{$_.ProcessName-match'amule'}|Select-Object Id,ProcessName,Path|Format-List|Out-Host
