@@ -4,7 +4,7 @@ on:
   push:
     branches: [ backend-pack-ready ]
     paths:
-      - 'backend_pack/BackendPackV6.ps1'
+      - 'backend_pack/BackendPackV7.ps1'
       - 'backend_pack/BuildPackV7.ps1'
       - '.github/workflows/build-backend-pack-v7.yml'
   workflow_dispatch:
