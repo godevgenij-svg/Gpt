@@ -1,32 +1,36 @@
-name: Build GreyLink x64
+name: Build BlackLink custom x64
 
 on:
   workflow_dispatch:
   push:
     branches: [ main ]
 
+concurrency:
+  group: blacklink-custom-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: windows-2022
 
     steps:
-      - name: Checkout GreyLink CI
+      - name: Checkout CI files
         uses: actions/checkout@v4
 
-      - name: Reconstruct and verify GreyLink Stage 2 patch
+      - name: Reconstruct and verify Stage 2 base patch
         shell: pwsh
         run: |
           $parts = Get-ChildItem "patches\ci2.part*" | Sort-Object Name
-          if ($parts.Count -ne 8) { throw "Expected 8 patch chunks, found $($parts.Count)" }
+          if ($parts.Count -ne 8) { throw "Expected 8 Stage 2 chunks, found $($parts.Count)" }
           $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
-          if ($b64.Length -ne 30604) { throw "Unexpected base64 length: $($b64.Length)" }
-          [IO.File]::WriteAllBytes("$PWD\GreyLink_Stage2_compile.patch.xz", [Convert]::FromBase64String($b64))
-          $xzHash = (Get-FileHash "$PWD\GreyLink_Stage2_compile.patch.xz" -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($xzHash -ne 'ff95c6073cde34ff3af0e082c06e5131273f4544a9ee81686d7420d9aba7f05b') { throw "XZ SHA256 mismatch: $xzHash" }
-          cmd /c "7z x GreyLink_Stage2_compile.patch.xz -so > GreyLink_Stage2_compile.patch"
+          if ($b64.Length -ne 30604) { throw "Unexpected Stage 2 base64 length: $($b64.Length)" }
+          [IO.File]::WriteAllBytes("$PWD\Stage2.patch.xz", [Convert]::FromBase64String($b64))
+          $xzHash = (Get-FileHash "$PWD\Stage2.patch.xz" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($xzHash -ne 'ff95c6073cde34ff3af0e082c06e5131273f4544a9ee81686d7420d9aba7f05b') { throw "Stage 2 XZ SHA256 mismatch: $xzHash" }
+          cmd /c "7z x Stage2.patch.xz -so > Stage2.patch"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $patchHash = (Get-FileHash "$PWD\GreyLink_Stage2_compile.patch" -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($patchHash -ne 'c120d913ac679d4b494d6ac7877b50c1e96beb431dac5bbc4912cf617ab31999') { throw "Patch SHA256 mismatch: $patchHash" }
+          $patchHash = (Get-FileHash "$PWD\Stage2.patch" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($patchHash -ne 'c120d913ac679d4b494d6ac7877b50c1e96beb431dac5bbc4912cf617ab31999') { throw "Stage 2 patch SHA256 mismatch: $patchHash" }
 
       - name: Clone pinned BlackLink upstream
         shell: pwsh
@@ -36,12 +40,12 @@ jobs:
           $actual = (git -C blacklink rev-parse HEAD).Trim()
           if ($actual -ne '1a72cfddca154da9070caca1b5a02df56d5498ab') { throw "Wrong upstream commit: $actual" }
 
-      - name: Apply GreyLink Stage 2 patch
+      - name: Apply Stage 2 base patch
         shell: pwsh
         run: |
           $patchExe = "C:\Program Files\Git\usr\bin\patch.exe"
           if (-not (Test-Path $patchExe)) { throw "patch.exe not found: $patchExe" }
-          & $patchExe -p2 -d blacklink -i "$PWD\GreyLink_Stage2_compile.patch" --batch --forward
+          & $patchExe -p2 -d blacklink -i "$PWD\Stage2.patch" --batch --forward
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Apply MakeDefs hang hotfix
@@ -59,7 +63,7 @@ jobs:
           & $patchExe -p2 -d blacklink -i "$PWD\patches\GreyLink_Stage2_compilefix1.patch" --batch --forward
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Apply Russian runtime localization
+      - name: Apply Russian runtime source fixes
         shell: pwsh
         run: |
           $patchExe = "C:\Program Files\Git\usr\bin\patch.exe"
@@ -83,6 +87,52 @@ jobs:
             if (-not $line.Contains(',')) { $bad += "line $($i + 1): $line" }
           }
           if ($bad.Count -gt 0) { throw ("Unsafe StringDefs lines for MakeDefs:`n" + ($bad -join "`n")) }
+
+      - name: Reconstruct verify and apply Stage 3 external search patch
+        shell: pwsh
+        run: |
+          $parts = Get-ChildItem "patches\stage3.part*" | Sort-Object Name
+          if ($parts.Count -ne 4) { throw "Expected 4 Stage 3 chunks, found $($parts.Count)" }
+          $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+          if ($b64.Length -ne 24024) { throw "Unexpected Stage 3 base64 length: $($b64.Length)" }
+          [IO.File]::WriteAllBytes("$PWD\Stage3.patch.xz", [Convert]::FromBase64String($b64))
+          $xzHash = (Get-FileHash "$PWD\Stage3.patch.xz" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($xzHash -ne 'ed453da31122b6cec97566b119ff119c25cf34f9d3cc4b7b7cfd94b40926f8ff') { throw "Stage 3 XZ SHA256 mismatch: $xzHash" }
+          cmd /c "7z x Stage3.patch.xz -so > Stage3.patch"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $patchHash = (Get-FileHash "$PWD\Stage3.patch" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($patchHash -ne '54eb0e38f49c355f48c4c0894dbd527bc5aa446295b8ea681aa233c52cabc58c') { throw "Stage 3 patch SHA256 mismatch: $patchHash" }
+          git -C blacklink apply --check ../Stage3.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C blacklink apply ../Stage3.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C blacklink diff --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Install and validate complete sharp Russian localization
+        shell: pwsh
+        run: |
+          $parts = Get-ChildItem "patches\ru3.part*" | Sort-Object Name
+          if ($parts.Count -ne 10) { throw "Expected 10 Russian localization chunks, found $($parts.Count)" }
+          $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+          if ($b64.Length -ne 49052) { throw "Unexpected localization base64 length: $($b64.Length)" }
+          [IO.File]::WriteAllBytes("$PWD\ru-RU.xml.xz", [Convert]::FromBase64String($b64))
+          $xzHash = (Get-FileHash "$PWD\ru-RU.xml.xz" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($xzHash -ne '6f166a6f7b9c851eed35067a709b077cb380973258799e4b60616948a1691aab') { throw "Localization XZ SHA256 mismatch: $xzHash" }
+          New-Item -ItemType Directory -Force "blacklink\compiled\Lang" | Out-Null
+          cmd /c "7z x ru-RU.xml.xz -so > blacklink\compiled\Lang\ru-RU.xml"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $xmlHash = (Get-FileHash "blacklink\compiled\Lang\ru-RU.xml" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($xmlHash -ne '46a333b6096be695b0f35d30cc99dfc028398739459705c5aad96123c2f5a6c8') { throw "Localization XML SHA256 mismatch: $xmlHash" }
+          [xml]$xml = Get-Content "blacklink\compiled\Lang\ru-RU.xml" -Raw -Encoding UTF8
+          $nodes = @($xml.Language.Strings.String)
+          if ($nodes.Count -ne 2016) { throw "Expected 2016 strings, got $($nodes.Count)" }
+          $unique = @($nodes | ForEach-Object { $_.Name } | Sort-Object -Unique)
+          if ($unique.Count -ne 2016) { throw "Expected 2016 unique string names, got $($unique.Count)" }
+          if ($xml.Language.Revision -ne '4-sharp') { throw "Unexpected localization revision: $($xml.Language.Revision)" }
+          if (-not ($nodes | Where-Object { $_.Name -eq 'ExternalSearchSources' })) { throw "ExternalSearchSources localization is missing" }
+          if ($nodes | Where-Object { $_.Name -eq 'GreyBridgeSettings' }) { throw "Legacy GreyBridgeSettings localization is still present" }
+          Write-Host "Russian localization OK: 2016/2016 unique, revision 4-sharp"
 
       - name: Setup MSBuild x64
         uses: microsoft/setup-msbuild@v2
@@ -163,26 +213,35 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: GreyLink-msbuild-log
+          name: BlackLink-custom-msbuild-log
           path: msbuild.log
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Verify executable
+      - name: Verify executable and runtime files
         shell: pwsh
         run: |
-          if (-not (Test-Path "blacklink\compiled\blacklink_x64.exe")) { throw "blacklink_x64.exe was not produced" }
-          Get-Item "blacklink\compiled\blacklink_x64.exe" | Format-List Name,Length,LastWriteTime
+          $required = @(
+            'blacklink\compiled\blacklink_x64.exe',
+            'blacklink\compiled\Lang\ru-RU.xml',
+            'blacklink\compiled\Settings\ExternalSearch.xml'
+          )
+          foreach ($file in $required) {
+            if (-not (Test-Path $file)) { throw "Required runtime file missing: $file" }
+          }
+          if (Test-Path 'blacklink\compiled\Settings\GreyBridge.xml') { throw 'Legacy GreyBridge.xml should not be packaged' }
+          Get-Item $required | Format-Table Name,Length,LastWriteTime
 
-      - name: Package GreyLink
+      - name: Package BlackLink custom build
         shell: pwsh
         run: |
-          if (Test-Path GreyLink-x64.zip) { Remove-Item GreyLink-x64.zip -Force }
-          Compress-Archive -Path blacklink\compiled\* -DestinationPath GreyLink-x64.zip -CompressionLevel Optimal
+          if (Test-Path BlackLink-custom-x64.zip) { Remove-Item BlackLink-custom-x64.zip -Force }
+          Compress-Archive -Path blacklink\compiled\* -DestinationPath BlackLink-custom-x64.zip -CompressionLevel Optimal
+          if (-not (Test-Path BlackLink-custom-x64.zip)) { throw 'Package was not created' }
 
-      - name: Upload artifact
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: GreyLink-x64
-          path: GreyLink-x64.zip
+          name: BlackLink-custom-x64
+          path: BlackLink-custom-x64.zip
           if-no-files-found: error
