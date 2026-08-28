@@ -47,70 +47,82 @@ jobs:
           Binary downloaded from the official GitHub release during CI build.
           "@ | Set-Content -Encoding UTF8 .\GreyVPN\publish\engines\THIRD_PARTY_sing-box.txt
 
-      - name: Bundle OpenVPN 2.6.22 Wintun engine
+      - name: Bundle OpenVPN 2.6.22 and verified Wintun 0.14.1
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $url = 'https://build.openvpn.net/downloads/releases/OpenVPN-2.6.22-I001-amd64.msi'
-          Write-Host "Downloading $url"
-          Invoke-WebRequest -Uri $url -OutFile openvpn.msi
+
+          $openVpnUrl = 'https://build.openvpn.net/downloads/releases/OpenVPN-2.6.22-I001-amd64.msi'
+          Write-Host "Downloading $openVpnUrl"
+          Invoke-WebRequest -Uri $openVpnUrl -OutFile openvpn.msi
           if ((Get-Item .\openvpn.msi).Length -lt 1000000) { throw 'Downloaded OpenVPN MSI is unexpectedly small' }
 
           $msi = (Resolve-Path .\openvpn.msi).Path
           $extract = Join-Path (Get-Location) 'openvpn-dist'
           New-Item -ItemType Directory -Force -Path $extract | Out-Null
-
-          Write-Host 'Trying MSI administrative extraction...'
           $p = Start-Process msiexec.exe -ArgumentList @('/a', $msi, '/qn', "TARGETDIR=$extract") -Wait -PassThru
-          Write-Host "msiexec exit code: $($p.ExitCode)"
+          if ($p.ExitCode -ne 0) { throw "OpenVPN MSI administrative extraction failed: $($p.ExitCode)" }
 
-          $searchRoots = @($extract)
           $openvpn = Get-ChildItem $extract -Recurse -Filter openvpn.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-
-          if (-not $openvpn) {
-            Write-Host 'Administrative extraction did not expose openvpn.exe; trying 7-Zip fallback.'
-            $seven = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
-            if (-not (Test-Path $seven)) { throw '7-Zip not found on GitHub runner' }
-            $sevenRoot = Join-Path (Get-Location) 'openvpn-7z'
-            New-Item -ItemType Directory -Force -Path $sevenRoot | Out-Null
-            & $seven x $msi "-o$sevenRoot" -y | Out-Host
-            Get-ChildItem $sevenRoot -Recurse -Filter '*.cab' -ErrorAction SilentlyContinue | ForEach-Object {
-              $cabOut = Join-Path $sevenRoot ('cab_' + [IO.Path]::GetFileNameWithoutExtension($_.Name))
-              New-Item -ItemType Directory -Force -Path $cabOut | Out-Null
-              & $seven x $_.FullName "-o$cabOut" -y | Out-Host
-            }
-            $searchRoots += $sevenRoot
-            $openvpn = Get-ChildItem $sevenRoot -Recurse -Filter openvpn.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-          }
-
-          if (-not $openvpn) { throw 'openvpn.exe not found after MSI/7-Zip extraction' }
+          if (-not $openvpn) { throw 'openvpn.exe not found after official MSI extraction' }
           Write-Host "Found OpenVPN: $($openvpn.FullName)"
 
           $engineDir = '.\GreyVPN\publish\engines\openvpn'
           New-Item -ItemType Directory -Force -Path $engineDir | Out-Null
           Copy-Item (Join-Path $openvpn.Directory.FullName '*') $engineDir -Recurse -Force
 
-          $wintun = $null
-          foreach ($root in $searchRoots) {
-            $wintun = Get-ChildItem $root -Recurse -Filter wintun.dll -ErrorAction SilentlyContinue |
-              Where-Object { $_.FullName -match 'amd64|x64|Win10' } | Select-Object -First 1
-            if (-not $wintun) {
-              $wintun = Get-ChildItem $root -Recurse -Filter wintun.dll -ErrorAction SilentlyContinue | Select-Object -First 1
-            }
-            if ($wintun) { break }
+          $wintunUrl = 'https://www.wintun.net/builds/wintun-0.14.1.zip'
+          $wintunExpectedSha256 = '07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51'
+          Write-Host "Downloading $wintunUrl"
+          Invoke-WebRequest -Uri $wintunUrl -OutFile wintun.zip
+          $wintunActualSha256 = (Get-FileHash .\wintun.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($wintunActualSha256 -ne $wintunExpectedSha256) {
+            throw "Wintun SHA256 mismatch. Expected $wintunExpectedSha256, got $wintunActualSha256"
           }
-          if (-not $wintun) { throw 'wintun.dll not found in official OpenVPN 2.6.22 MSI' }
-          Write-Host "Found Wintun: $($wintun.FullName)"
+          Write-Host "Wintun SHA256 verified: $wintunActualSha256"
+
+          Expand-Archive .\wintun.zip -DestinationPath .\wintun-dist
+          $wintun = Get-ChildItem .\wintun-dist -Recurse -Filter wintun.dll |
+            Where-Object { $_.FullName -match '[\\/]bin[\\/]amd64[\\/]' } |
+            Select-Object -First 1
+          if (-not $wintun) { throw 'AMD64 wintun.dll not found in official Wintun archive' }
           Copy-Item $wintun.FullName (Join-Path $engineDir 'wintun.dll') -Force
 
-          & (Join-Path $engineDir 'openvpn.exe') --version | Select-Object -First 2
+          $wintunLicense = Get-ChildItem .\wintun-dist -Recurse -File |
+            Where-Object { $_.Name -match '^LICENSE(\.txt)?$|^COPYING(\.txt)?$' } |
+            Select-Object -First 1
+          if ($wintunLicense) {
+            Copy-Item $wintunLicense.FullName (Join-Path $engineDir 'THIRD_PARTY_Wintun_LICENSE.txt') -Force
+          }
+
+          $openVpnVersion = & (Join-Path $engineDir 'openvpn.exe') --version 2>&1
+          $openVpnVersion | Select-Object -First 2 | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "Bundled openvpn.exe --version failed: $LASTEXITCODE" }
+          if (-not ($openVpnVersion -join "`n").Contains('OpenVPN 2.6.22')) { throw 'Unexpected OpenVPN version in bundle' }
+          if (-not (Test-Path (Join-Path $engineDir 'wintun.dll'))) { throw 'Bundled wintun.dll is missing' }
+
           @"
           OpenVPN Community 2.6.22-I001 amd64
           Source: https://community.openvpn.net/Downloads
-          Binary: official OpenVPN Community Windows MSI extracted during CI build.
-          Wintun is used only for isolated real-test sessions. GreyVPN must be elevated for this test.
-          OpenVPN licensing notices apply to the bundled binary and libraries.
-          "@ | Set-Content -Encoding UTF8 (Join-Path $engineDir 'THIRD_PARTY_OpenVPN.txt')
+          Binary: official OpenVPN Community Windows MSI, administratively extracted during CI build.
+
+          Wintun 0.14.1 AMD64
+          Source: https://www.wintun.net/
+          SHA2-256: 07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51
+          The signed prebuilt Wintun DLL is downloaded from the official Wintun archive and hash-verified during CI.
+
+          OpenVPN real-test uses an isolated route for the probe and requires GreyVPN to run elevated.
+          "@ | Set-Content -Encoding UTF8 (Join-Path $engineDir 'THIRD_PARTY_OpenVPN_Wintun.txt')
+
+      - name: Verify packaged engines
+        shell: pwsh
+        run: |
+          if (-not (Test-Path .\GreyVPN\publish\GreyVPN.exe)) { throw 'GreyVPN.exe missing' }
+          if (-not (Test-Path .\GreyVPN\publish\engines\sing-box.exe)) { throw 'sing-box.exe missing' }
+          if (-not (Test-Path .\GreyVPN\publish\engines\openvpn\openvpn.exe)) { throw 'openvpn.exe missing' }
+          if (-not (Test-Path .\GreyVPN\publish\engines\openvpn\wintun.dll)) { throw 'wintun.dll missing' }
+          .\GreyVPN\publish\engines\sing-box.exe version | Select-Object -First 1
+          .\GreyVPN\publish\engines\openvpn\openvpn.exe --version | Select-Object -First 2
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
