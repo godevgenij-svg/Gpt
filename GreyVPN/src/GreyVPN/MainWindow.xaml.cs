@@ -13,11 +13,11 @@ namespace GreyVPN;
 public partial class MainWindow : Window, INotifyPropertyChanged
 {
     private const int TestConcurrency = 8;
+    private const int RealTestConcurrency = 2;
     private CancellationTokenSource? _testCts;
     private ICollectionView? _profilesView;
 
     public ObservableCollection<VpnProfile> Profiles { get; } = new();
-
     public event PropertyChangedEventHandler? PropertyChanged;
 
     public MainWindow()
@@ -36,7 +36,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             ProfileImporter.RefreshParsedFields(profile);
             Profiles.Add(profile);
         }
-
         _profilesView = CollectionViewSource.GetDefaultView(Profiles);
         RefreshStatus($"Готово. Профилей: {Profiles.Count}");
     }
@@ -54,11 +53,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             Multiselect = true,
             Filter = "VPN configs|*.ovpn;*.conf;*.txt;*.json;*.yaml;*.yml;*.vpn|All files|*.*"
         };
-
-        if (dialog.ShowDialog(this) != true)
-            return;
-
-        await ImportAsync(dialog.FileNames);
+        if (dialog.ShowDialog(this) == true) await ImportAsync(dialog.FileNames);
     }
 
     private async void ImportFolder_Click(object sender, RoutedEventArgs e)
@@ -69,11 +64,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             UseDescriptionForTitle = true,
             ShowNewFolderButton = false
         };
-
-        if (dialog.ShowDialog() != System.Windows.Forms.DialogResult.OK)
-            return;
-
-        await ImportAsync(ProfileImporter.EnumerateSupportedFiles(dialog.SelectedPath));
+        if (dialog.ShowDialog() == System.Windows.Forms.DialogResult.OK)
+            await ImportAsync(ProfileImporter.EnumerateSupportedFiles(dialog.SelectedPath));
     }
 
     private async Task ImportAsync(IEnumerable<string> paths)
@@ -84,7 +76,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             var imported = await ProfileImporter.ImportFilesAsync(paths);
             var existing = new HashSet<string>(Profiles.Select(BuildUiIdentity), StringComparer.OrdinalIgnoreCase);
             var added = 0;
-
             foreach (var profile in imported)
             {
                 ProfileImporter.RefreshParsedFields(profile);
@@ -94,7 +85,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     added++;
                 }
             }
-
             await ProfileStore.SaveAsync(Profiles);
             _profilesView?.Refresh();
             RefreshStatus($"Импортировано новых: {added}. Всего: {Profiles.Count}");
@@ -106,56 +96,38 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
-    private async void TestSelected_Click(object sender, RoutedEventArgs e)
-    {
-        var selected = ProfilesGrid.SelectedItems.Cast<VpnProfile>().ToList();
-        await TestProfilesAsync(selected);
-    }
+    private async void TestSelected_Click(object sender, RoutedEventArgs e) =>
+        await TestProfilesAsync(ProfilesGrid.SelectedItems.Cast<VpnProfile>().ToList());
 
-    private async void TestAll_Click(object sender, RoutedEventArgs e)
-    {
+    private async void TestAll_Click(object sender, RoutedEventArgs e) =>
         await TestProfilesAsync(Profiles.ToList());
-    }
 
     private async Task TestProfilesAsync(IReadOnlyList<VpnProfile> profiles)
     {
-        if (profiles.Count == 0)
-            return;
-
+        if (profiles.Count == 0) return;
         _testCts?.Cancel();
         _testCts = new CancellationTokenSource();
         var ct = _testCts.Token;
         var completed = 0;
         using var gate = new SemaphoreSlim(TestConcurrency);
-
         try
         {
-            RefreshStatus($"Проверка 0/{profiles.Count}. Параллельно: {TestConcurrency}");
-
+            RefreshStatus($"Предтест 0/{profiles.Count}. Параллельно: {TestConcurrency}");
             var tasks = profiles.Select(async profile =>
             {
                 await gate.WaitAsync(ct);
-                try
-                {
-                    await ProfileTester.TestAsync(profile, ct);
-                }
+                try { await ProfileTester.TestAsync(profile, ct); }
                 finally
                 {
                     gate.Release();
                     var done = Interlocked.Increment(ref completed);
-                    await Dispatcher.InvokeAsync(() =>
-                        RefreshStatus($"Проверка {done}/{profiles.Count}. Отклик: {profiles.Count(ProfileTester.IsResponsive)}"));
+                    await Dispatcher.InvokeAsync(() => RefreshStatus($"Предтест {done}/{profiles.Count}. Отклик: {profiles.Count(ProfileTester.IsResponsive)}"));
                 }
             }).ToArray();
-
             await Task.WhenAll(tasks);
-            var responsive = profiles.Count(ProfileTester.IsResponsive);
-            RefreshStatus($"Проверка завершена: {profiles.Count}. Откликнулись: {responsive}");
+            RefreshStatus($"Предтест завершён: {profiles.Count}. Откликнулись: {profiles.Count(ProfileTester.IsResponsive)}");
         }
-        catch (OperationCanceledException)
-        {
-            RefreshStatus($"Проверка остановлена: {completed}/{profiles.Count}");
-        }
+        catch (OperationCanceledException) { RefreshStatus($"Предтест остановлен: {completed}/{profiles.Count}"); }
         finally
         {
             _profilesView?.Refresh();
@@ -163,17 +135,59 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
-    private void Stop_Click(object sender, RoutedEventArgs e)
+    private async void RealTestSelected_Click(object sender, RoutedEventArgs e) =>
+        await RealTestProfilesAsync(ProfilesGrid.SelectedItems.Cast<VpnProfile>().ToList());
+
+    private async void RealTestResponsive_Click(object sender, RoutedEventArgs e)
     {
-        _testCts?.Cancel();
+        var candidates = Profiles.Where(p => ProfileTester.IsResponsive(p) && SingBoxConfigBuilder.Supports(p)).ToList();
+        await RealTestProfilesAsync(candidates);
     }
+
+    private async Task RealTestProfilesAsync(IReadOnlyList<VpnProfile> profiles)
+    {
+        if (profiles.Count == 0)
+        {
+            RefreshStatus("Нет подходящих VLESS/VMESS/TROJAN/HYSTERIA2 профилей для реального теста.");
+            return;
+        }
+
+        _testCts?.Cancel();
+        _testCts = new CancellationTokenSource();
+        var ct = _testCts.Token;
+        var completed = 0;
+        using var gate = new SemaphoreSlim(RealTestConcurrency);
+        try
+        {
+            RefreshStatus($"Реальный тест 0/{profiles.Count}. Параллельно: {RealTestConcurrency}");
+            var tasks = profiles.Select(async profile =>
+            {
+                await gate.WaitAsync(ct);
+                try { await RealProxyTester.TestAsync(profile, ct); }
+                finally
+                {
+                    gate.Release();
+                    var done = Interlocked.Increment(ref completed);
+                    await Dispatcher.InvokeAsync(() => RefreshStatus($"Реальный тест {done}/{profiles.Count}. Работают: {profiles.Count(RealProxyTester.IsRealWorking)}"));
+                }
+            }).ToArray();
+            await Task.WhenAll(tasks);
+            RefreshStatus($"Реальный тест завершён: {profiles.Count}. Работают: {profiles.Count(RealProxyTester.IsRealWorking)}");
+        }
+        catch (OperationCanceledException) { RefreshStatus($"Реальный тест остановлен: {completed}/{profiles.Count}"); }
+        finally
+        {
+            _profilesView?.Refresh();
+            await ProfileStore.SaveAsync(Profiles);
+        }
+    }
+
+    private void Stop_Click(object sender, RoutedEventArgs e) => _testCts?.Cancel();
 
     private async void DeleteSelected_Click(object sender, RoutedEventArgs e)
     {
         var selected = ProfilesGrid.SelectedItems.Cast<VpnProfile>().ToList();
-        foreach (var profile in selected)
-            Profiles.Remove(profile);
-
+        foreach (var profile in selected) Profiles.Remove(profile);
         await ProfileStore.SaveAsync(Profiles);
         _profilesView?.Refresh();
         RefreshStatus($"Удалено: {selected.Count}. Осталось: {Profiles.Count}");
@@ -182,9 +196,17 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void ShowResponsive_Click(object sender, RoutedEventArgs e)
     {
         _profilesView ??= CollectionViewSource.GetDefaultView(Profiles);
-        _profilesView.Filter = item => item is VpnProfile profile && ProfileTester.IsResponsive(profile);
+        _profilesView.Filter = item => item is VpnProfile p && ProfileTester.IsResponsive(p);
         _profilesView.Refresh();
         RefreshStatus($"Показаны откликнувшиеся: {Profiles.Count(ProfileTester.IsResponsive)}");
+    }
+
+    private void ShowRealWorking_Click(object sender, RoutedEventArgs e)
+    {
+        _profilesView ??= CollectionViewSource.GetDefaultView(Profiles);
+        _profilesView.Filter = item => item is VpnProfile p && RealProxyTester.IsRealWorking(p);
+        _profilesView.Refresh();
+        RefreshStatus($"Показаны реально рабочие: {Profiles.Count(RealProxyTester.IsRealWorking)}");
     }
 
     private void ShowAll_Click(object sender, RoutedEventArgs e)
@@ -200,10 +222,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         var responsive = Profiles.Where(ProfileTester.IsResponsive).ToList();
         if (responsive.Count == 0)
         {
-            System.Windows.MessageBox.Show(this, "Нет профилей с подтверждённым откликом предварительного теста.", "Экспорт", MessageBoxButton.OK, MessageBoxImage.Information);
+            System.Windows.MessageBox.Show(this, "Нет профилей с откликом предварительного теста.", "Экспорт", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
-
         var dialog = new Microsoft.Win32.SaveFileDialog
         {
             Filter = "ZIP archive|*.zip",
@@ -211,61 +232,42 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             AddExtension = true,
             DefaultExt = ".zip"
         };
-
-        if (dialog.ShowDialog(this) != true)
-            return;
-
+        if (dialog.ShowDialog(this) != true) return;
         try
         {
             ExportResponsiveZip(dialog.FileName, responsive);
-            RefreshStatus($"Экспортировано откликнувшихся: {responsive.Count}");
+            RefreshStatus($"Экспортировано: {responsive.Count}; реально рабочие среди них: {responsive.Count(RealProxyTester.IsRealWorking)}");
         }
-        catch (Exception ex)
-        {
-            System.Windows.MessageBox.Show(this, ex.Message, "Ошибка экспорта", MessageBoxButton.OK, MessageBoxImage.Error);
-        }
+        catch (Exception ex) { System.Windows.MessageBox.Show(this, ex.Message, "Ошибка экспорта", MessageBoxButton.OK, MessageBoxImage.Error); }
     }
 
     private static void ExportResponsiveZip(string zipPath, IReadOnlyList<VpnProfile> profiles)
     {
-        if (File.Exists(zipPath))
-            File.Delete(zipPath);
-
+        if (File.Exists(zipPath)) File.Delete(zipPath);
         var proxyLinks = new StringBuilder();
-        var manifest = new StringBuilder("Name\tType\tEndpoint\tTransport\tStatus\tTCP_ms\tICMP_ms\tAttempts\r\n");
+        var manifest = new StringBuilder("Name\tType\tEndpoint\tTransport\tPreStatus\tTCP_ms\tICMP_ms\tRealStatus\tExitIP\tReal_ms\tRealError\r\n");
         var usedEntries = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
         using var archive = ZipFile.Open(zipPath, ZipArchiveMode.Create);
-
-        foreach (var profile in profiles)
+        foreach (var p in profiles)
         {
-            manifest.Append(profile.Name).Append('\t')
-                .Append(profile.Type).Append('\t')
-                .Append(profile.Endpoint).Append('\t')
-                .Append(profile.Transport).Append('\t')
-                .Append(profile.Status).Append('\t')
-                .Append(profile.TcpConnectMs?.ToString() ?? string.Empty).Append('\t')
-                .Append(profile.PingMs?.ToString() ?? string.Empty).Append('\t')
-                .Append(profile.TestAttempts).Append("\r\n");
-
-            if (!string.IsNullOrWhiteSpace(profile.RawValue) && profile.RawValue.Contains("://", StringComparison.Ordinal))
+            manifest.Append(p.Name).Append('\t').Append(p.Type).Append('\t').Append(p.Endpoint).Append('\t').Append(p.Transport).Append('\t')
+                .Append(p.Status).Append('\t').Append(p.TcpConnectMs).Append('\t').Append(p.PingMs).Append('\t')
+                .Append(p.RealStatus).Append('\t').Append(p.ExitIp).Append('\t').Append(p.RealTestMs).Append('\t')
+                .Append(p.RealError.Replace('\t', ' ')).Append("\r\n");
+            if (!string.IsNullOrWhiteSpace(p.RawValue) && p.RawValue.Contains("://", StringComparison.Ordinal))
             {
-                proxyLinks.AppendLine(profile.RawValue.Trim());
+                proxyLinks.AppendLine(p.RawValue.Trim());
                 continue;
             }
-
-            if (!string.IsNullOrWhiteSpace(profile.SourcePath) && File.Exists(profile.SourcePath))
+            if (!string.IsNullOrWhiteSpace(p.SourcePath) && File.Exists(p.SourcePath))
             {
-                var folder = SanitizeFileName(profile.Type);
-                var file = SanitizeFileName(Path.GetFileName(profile.SourcePath));
-                var entryName = MakeUniqueEntry($"{folder}/{file}", usedEntries);
-                archive.CreateEntryFromFile(profile.SourcePath, entryName, CompressionLevel.Optimal);
+                var folder = SanitizeFileName(p.Type);
+                var file = SanitizeFileName(Path.GetFileName(p.SourcePath));
+                archive.CreateEntryFromFile(p.SourcePath, MakeUniqueEntry($"{folder}/{file}", usedEntries), CompressionLevel.Optimal);
             }
         }
-
         WriteTextEntry(archive, "responsive_manifest.tsv", manifest.ToString());
-        if (proxyLinks.Length > 0)
-            WriteTextEntry(archive, "proxy_links.txt", proxyLinks.ToString());
+        if (proxyLinks.Length > 0) WriteTextEntry(archive, "proxy_links.txt", proxyLinks.ToString());
     }
 
     private static void WriteTextEntry(ZipArchive archive, string name, string content)
@@ -277,38 +279,29 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private static string MakeUniqueEntry(string desired, HashSet<string> used)
     {
-        if (used.Add(desired))
-            return desired;
-
+        if (used.Add(desired)) return desired;
         var directory = Path.GetDirectoryName(desired)?.Replace('\\', '/') ?? string.Empty;
         var baseName = Path.GetFileNameWithoutExtension(desired);
         var ext = Path.GetExtension(desired);
         for (var i = 2; ; i++)
         {
-            var candidateFile = $"{baseName}_{i}{ext}";
-            var candidate = string.IsNullOrEmpty(directory) ? candidateFile : $"{directory}/{candidateFile}";
-            if (used.Add(candidate))
-                return candidate;
+            var file = $"{baseName}_{i}{ext}";
+            var candidate = string.IsNullOrEmpty(directory) ? file : $"{directory}/{file}";
+            if (used.Add(candidate)) return candidate;
         }
     }
 
     private static string SanitizeFileName(string value)
     {
-        foreach (var c in Path.GetInvalidFileNameChars())
-            value = value.Replace(c, '_');
+        foreach (var c in Path.GetInvalidFileNameChars()) value = value.Replace(c, '_');
         return string.IsNullOrWhiteSpace(value) ? "Unknown" : value;
     }
 
-    private void RefreshStatus(string text)
-    {
-        StatusText.Text = text;
-    }
+    private void RefreshStatus(string text) => StatusText.Text = text;
 
     private static string BuildUiIdentity(VpnProfile p)
     {
-        if (!string.IsNullOrWhiteSpace(p.RawValue) && p.RawValue.Contains("://", StringComparison.Ordinal))
-            return p.RawValue.Trim();
-
+        if (!string.IsNullOrWhiteSpace(p.RawValue) && p.RawValue.Contains("://", StringComparison.Ordinal)) return p.RawValue.Trim();
         return $"{p.SourcePath}|{p.Type}|{p.Name}";
     }
 }
