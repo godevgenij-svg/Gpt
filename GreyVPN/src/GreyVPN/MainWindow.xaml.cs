@@ -1,10 +1,8 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Windows;
-using System.Windows.Forms;
 using GreyVPN.Models;
 using GreyVPN.Services;
-using Microsoft.Win32;
 
 namespace GreyVPN;
 
@@ -41,7 +39,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private async void ImportFiles_Click(object sender, RoutedEventArgs e)
     {
-        var dialog = new OpenFileDialog
+        var dialog = new Microsoft.Win32.OpenFileDialog
         {
             Multiselect = true,
             Filter = "VPN configs|*.ovpn;*.conf;*.txt;*.json;*.yaml;*.yml;*.vpn|All files|*.*"
@@ -55,7 +53,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private async void ImportFolder_Click(object sender, RoutedEventArgs e)
     {
-        using var dialog = new FolderBrowserDialog
+        using var dialog = new System.Windows.Forms.FolderBrowserDialog
         {
             Description = "Выберите папку с VPN-конфигурациями",
             UseDescriptionForTitle = true,
