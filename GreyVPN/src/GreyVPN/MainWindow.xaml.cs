@@ -101,7 +101,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, ex.Message, "Ошибка импорта", MessageBoxButton.OK, MessageBoxImage.Error);
+            System.Windows.MessageBox.Show(this, ex.Message, "Ошибка импорта", MessageBoxButton.OK, MessageBoxImage.Error);
             RefreshStatus("Ошибка импорта");
         }
     }
@@ -200,7 +200,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         var responsive = Profiles.Where(ProfileTester.IsResponsive).ToList();
         if (responsive.Count == 0)
         {
-            MessageBox.Show(this, "Нет профилей с подтверждённым откликом предварительного теста.", "Экспорт", MessageBoxButton.OK, MessageBoxImage.Information);
+            System.Windows.MessageBox.Show(this, "Нет профилей с подтверждённым откликом предварительного теста.", "Экспорт", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
 
@@ -222,7 +222,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, ex.Message, "Ошибка экспорта", MessageBoxButton.OK, MessageBoxImage.Error);
+            System.Windows.MessageBox.Show(this, ex.Message, "Ошибка экспорта", MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
 
