@@ -7,7 +7,7 @@ namespace GreyVPN.Services;
 
 public static class RealProxyTester
 {
-    private static readonly TimeSpan OverallTimeout = TimeSpan.FromSeconds(18);
+    private static readonly TimeSpan OverallTimeout = TimeSpan.FromSeconds(22);
 
     public static bool IsRealWorking(VpnProfile p) => p.RealStatus.Equals("РАБОТАЕТ", StringComparison.OrdinalIgnoreCase);
 
@@ -22,7 +22,12 @@ public static class RealProxyTester
         if (!SingBoxConfigBuilder.Supports(profile))
         {
             profile.RealStatus = "НЕ ПОДДЕРЖАН";
-            profile.RealError = "Реальный тест v0.3: VLESS / VMESS / TROJAN / HYSTERIA2.";
+            if (profile.Type.Equals("AmneziaWG", StringComparison.OrdinalIgnoreCase))
+                profile.RealError = "AmneziaWG не проверяется стандартным WireGuard: нужен отдельный AWG-движок, иначе результат был бы ложным.";
+            else if (profile.Type.Equals("OpenVPN", StringComparison.OrdinalIgnoreCase))
+                profile.RealError = "OpenVPN real-test не включён: стабильный sing-box 1.13.19 ещё не содержит OpenVPN client endpoint.";
+            else
+                profile.RealError = "Real v0.4: VLESS / VMESS / TROJAN / HYSTERIA2 / WireGuard / SS / SOCKS / HTTP(S).";
             return;
         }
 
@@ -91,7 +96,7 @@ public static class RealProxyTester
                 UseProxy = true,
                 AllowAutoRedirect = false
             };
-            using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(10) };
+            using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(12) };
 
             using var probe = await client.GetAsync("https://www.gstatic.com/generate_204", token);
             if ((int)probe.StatusCode < 200 || (int)probe.StatusCode >= 400)
