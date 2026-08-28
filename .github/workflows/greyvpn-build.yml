@@ -1,0 +1,33 @@
+name: GreyVPN Windows build
+
+on:
+  push:
+    branches:
+      - greyvpn-v0.1
+    paths:
+      - 'GreyVPN/**'
+      - '.github/workflows/greyvpn-build.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        run: dotnet restore .\GreyVPN\src\GreyVPN\GreyVPN.csproj
+
+      - name: Publish win-x64
+        run: dotnet publish .\GreyVPN\src\GreyVPN\GreyVPN.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o .\GreyVPN\publish
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GreyVPN-win-x64
+          path: GreyVPN\publish\**
+          if-no-files-found: error
