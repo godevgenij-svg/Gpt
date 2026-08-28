@@ -7,6 +7,7 @@ on:
       - greyvpn-v0.2
       - greyvpn-v0.3
       - greyvpn-v0.4
+      - greyvpn-v0.5
     paths:
       - 'GreyVPN/**'
       - '.github/workflows/greyvpn-build.yml'
@@ -46,9 +47,43 @@ jobs:
           Binary downloaded from the official GitHub release during CI build.
           "@ | Set-Content -Encoding UTF8 .\GreyVPN\publish\engines\THIRD_PARTY_sing-box.txt
 
+      - name: Bundle OpenVPN 2.6.22 Wintun engine
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = 'https://swupdate.openvpn.org/community/releases/OpenVPN-2.6.22-I001-amd64.msi'
+          Invoke-WebRequest -Uri $url -OutFile openvpn.msi
+          $msi = (Resolve-Path .\openvpn.msi).Path
+          $extract = Join-Path (Get-Location) 'openvpn-dist'
+          New-Item -ItemType Directory -Force -Path $extract | Out-Null
+          $args = @('/a', $msi, '/qn', "TARGETDIR=$extract")
+          $p = Start-Process msiexec.exe -ArgumentList $args -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "OpenVPN MSI administrative extraction failed: $($p.ExitCode)" }
+
+          $openvpn = Get-ChildItem $extract -Recurse -Filter openvpn.exe | Select-Object -First 1
+          if (-not $openvpn) { throw 'openvpn.exe not found after MSI extraction' }
+
+          $engineDir = '.\GreyVPN\publish\engines\openvpn'
+          New-Item -ItemType Directory -Force -Path $engineDir | Out-Null
+          Copy-Item (Join-Path $openvpn.Directory.FullName '*') $engineDir -Recurse -Force
+
+          $wintun = Get-ChildItem $extract -Recurse -Filter wintun.dll | Where-Object { $_.FullName -match 'amd64|x64|Win10' } | Select-Object -First 1
+          if (-not $wintun) { $wintun = Get-ChildItem $extract -Recurse -Filter wintun.dll | Select-Object -First 1 }
+          if (-not $wintun) { throw 'wintun.dll not found in official OpenVPN 2.6.22 MSI' }
+          Copy-Item $wintun.FullName (Join-Path $engineDir 'wintun.dll') -Force
+
+          & (Join-Path $engineDir 'openvpn.exe') --version | Select-Object -First 2
+          @"
+          OpenVPN Community 2.6.22-I001 amd64
+          Source: https://community.openvpn.net/Downloads
+          Binary: official OpenVPN Community Windows MSI, administratively extracted during CI build.
+          Wintun is used only for isolated real-test sessions. GreyVPN must be elevated for this test.
+          OpenVPN licensing notices apply to the bundled binary and libraries.
+          "@ | Set-Content -Encoding UTF8 (Join-Path $engineDir 'THIRD_PARTY_OpenVPN.txt')
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: GreyVPN-v0.4-win-x64
+          name: GreyVPN-v0.5-win-x64
           path: GreyVPN\publish\**
           if-no-files-found: error
