@@ -16,6 +16,11 @@ public sealed class VpnProfile : INotifyPropertyChanged
     private int _testAttempts;
     private DateTimeOffset? _lastTested;
     private string _error = string.Empty;
+    private string _realStatus = "Не проверен";
+    private string _exitIp = string.Empty;
+    private long? _realTestMs;
+    private DateTimeOffset? _lastRealTested;
+    private string _realError = string.Empty;
 
     public Guid Id { get; set; } = Guid.NewGuid();
     public string Name { get => _name; set => Set(ref _name, value); }
@@ -33,6 +38,12 @@ public sealed class VpnProfile : INotifyPropertyChanged
     public int TestAttempts { get => _testAttempts; set => Set(ref _testAttempts, value); }
     public DateTimeOffset? LastTested { get => _lastTested; set => Set(ref _lastTested, value); }
     public string Error { get => _error; set => Set(ref _error, value); }
+
+    public string RealStatus { get => _realStatus; set => Set(ref _realStatus, value); }
+    public string ExitIp { get => _exitIp; set => Set(ref _exitIp, value); }
+    public long? RealTestMs { get => _realTestMs; set => Set(ref _realTestMs, value); }
+    public DateTimeOffset? LastRealTested { get => _lastRealTested; set => Set(ref _lastRealTested, value); }
+    public string RealError { get => _realError; set => Set(ref _realError, value); }
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
