@@ -13,7 +13,9 @@ public static class ProfileTester
 
     public static bool IsResponsive(VpnProfile profile) =>
         profile.Status.Equals("ENDPOINT OK", StringComparison.OrdinalIgnoreCase) ||
-        profile.Status.Equals("HOST ONLY", StringComparison.OrdinalIgnoreCase);
+        profile.Status.Equals("HOST ONLY", StringComparison.OrdinalIgnoreCase) ||
+        profile.Status.Equals("TCP доступен", StringComparison.OrdinalIgnoreCase) ||
+        profile.Status.Equals("Хост доступен", StringComparison.OrdinalIgnoreCase);
 
     public static async Task TestAsync(VpnProfile profile, CancellationToken ct)
     {
