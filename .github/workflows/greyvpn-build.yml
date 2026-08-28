@@ -5,6 +5,7 @@ on:
     branches:
       - greyvpn-v0.1
       - greyvpn-v0.2
+      - greyvpn-v0.3
     paths:
       - 'GreyVPN/**'
       - '.github/workflows/greyvpn-build.yml'
@@ -26,9 +27,27 @@ jobs:
       - name: Publish win-x64
         run: dotnet publish .\GreyVPN\src\GreyVPN\GreyVPN.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o .\GreyVPN\publish
 
+      - name: Bundle sing-box 1.13.19
+        shell: pwsh
+        run: |
+          $url = 'https://github.com/SagerNet/sing-box/releases/download/v1.13.19/sing-box-1.13.19-windows-amd64.zip'
+          Invoke-WebRequest -Uri $url -OutFile sing-box.zip
+          Expand-Archive sing-box.zip -DestinationPath sing-box-dist
+          New-Item -ItemType Directory -Force -Path .\GreyVPN\publish\engines | Out-Null
+          $exe = Get-ChildItem sing-box-dist -Recurse -Filter sing-box.exe | Select-Object -First 1
+          if (-not $exe) { throw 'sing-box.exe not found in official archive' }
+          Copy-Item $exe.FullName .\GreyVPN\publish\engines\sing-box.exe
+          .\GreyVPN\publish\engines\sing-box.exe version
+          @"
+          sing-box 1.13.19
+          Source: https://github.com/SagerNet/sing-box
+          License: GPL-3.0-or-later
+          Binary downloaded from the official GitHub release during CI build.
+          "@ | Set-Content -Encoding UTF8 .\GreyVPN\publish\engines\THIRD_PARTY_sing-box.txt
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: GreyVPN-v0.2-win-x64
+          name: GreyVPN-v0.3-win-x64
           path: GreyVPN\publish\**
           if-no-files-found: error
