@@ -1,6 +1,7 @@
 using System.IO;
 using System.Net;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using GreyVPN.Models;
 
@@ -75,6 +76,23 @@ public static partial class ProfileImporter
         return Deduplicate(result);
     }
 
+    public static void RefreshParsedFields(VpnProfile profile)
+    {
+        if (profile.PingMs is null && profile.LatencyMs is not null)
+            profile.PingMs = profile.LatencyMs;
+
+        if (string.IsNullOrWhiteSpace(profile.RawValue) || !profile.RawValue.Contains("://", StringComparison.Ordinal))
+            return;
+
+        if (!TryParseProxyUri(profile.RawValue.Trim(), out var parsed))
+            return;
+
+        if (!string.IsNullOrWhiteSpace(parsed.Name)) profile.Name = parsed.Name;
+        profile.Type = parsed.Type;
+        profile.Endpoint = parsed.Endpoint;
+        profile.Transport = parsed.Transport;
+    }
+
     private static VpnProfile ParseOpenVpn(string path, string text)
     {
         var remote = RemoteRegex().Match(text);
@@ -143,6 +161,9 @@ public static partial class ProfileImporter
         if (!ProxySchemes.Contains(scheme))
             return false;
 
+        if (scheme.Equals("vmess", StringComparison.OrdinalIgnoreCase) && TryParseVmess(raw, out profile))
+            return true;
+
         string name = scheme.ToUpperInvariant();
         string endpoint = string.Empty;
 
@@ -169,6 +190,78 @@ public static partial class ProfileImporter
         };
 
         return true;
+    }
+
+    private static bool TryParseVmess(string raw, out VpnProfile profile)
+    {
+        profile = new VpnProfile();
+        try
+        {
+            var payload = raw["vmess://".Length..];
+            var hash = payload.IndexOf('#');
+            if (hash >= 0) payload = payload[..hash];
+            payload = payload.Trim();
+
+            if (!TryDecodeBase64(payload, out var json))
+                return false;
+
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            var host = GetJsonText(root, "add");
+            var port = GetJsonText(root, "port");
+            var name = GetJsonText(root, "ps");
+            var transport = GetJsonText(root, "net");
+
+            if (string.IsNullOrWhiteSpace(host))
+                return false;
+
+            profile = new VpnProfile
+            {
+                Name = string.IsNullOrWhiteSpace(name) ? "VMESS" : name,
+                Type = "VMESS",
+                Endpoint = JoinEndpoint(host, port),
+                Transport = string.IsNullOrWhiteSpace(transport) ? "tcp" : transport,
+                RawValue = raw
+            };
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static string GetJsonText(JsonElement root, string property)
+    {
+        if (!root.TryGetProperty(property, out var value))
+            return string.Empty;
+
+        return value.ValueKind switch
+        {
+            JsonValueKind.String => value.GetString() ?? string.Empty,
+            JsonValueKind.Number => value.GetRawText(),
+            _ => string.Empty
+        };
+    }
+
+    private static bool TryDecodeBase64(string value, out string text)
+    {
+        text = string.Empty;
+        try
+        {
+            var normalized = value.Replace('-', '+').Replace('_', '/');
+            var mod = normalized.Length % 4;
+            if (mod == 2) normalized += "==";
+            else if (mod == 3) normalized += "=";
+            else if (mod == 1) return false;
+
+            text = Encoding.UTF8.GetString(Convert.FromBase64String(normalized));
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static VpnProfile ParseGeneric(string path, string type, string text) => new()
