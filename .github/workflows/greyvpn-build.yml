@@ -6,6 +6,7 @@ on:
       - greyvpn-v0.1
       - greyvpn-v0.2
       - greyvpn-v0.3
+      - greyvpn-v0.4
     paths:
       - 'GreyVPN/**'
       - '.github/workflows/greyvpn-build.yml'
@@ -48,6 +49,6 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: GreyVPN-v0.3-win-x64
+          name: GreyVPN-v0.4-win-x64
           path: GreyVPN\publish\**
           if-no-files-found: error
