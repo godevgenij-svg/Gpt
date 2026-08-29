@@ -31,7 +31,7 @@ public static class XrayConfigBuilder
 
         var root = new JsonObject
         {
-            ["log"] = new JsonObject { ["loglevel"] = "warning" },
+            ["log"] = new JsonObject { ["loglevel"] = "info" },
             ["inbounds"] = new JsonArray
             {
                 new JsonObject
@@ -187,8 +187,22 @@ public static class XrayConfigBuilder
                 var extra = Get(q, "extra");
                 if (!string.IsNullOrWhiteSpace(extra))
                 {
-                    try { xhttp["extra"] = JsonNode.Parse(extra); }
-                    catch { throw new InvalidDataException("XHTTP: параметр extra содержит неверный JSON."); }
+                    JsonNode? extraNode = null;
+                    try { extraNode = JsonNode.Parse(extra); }
+                    catch
+                    {
+                        // Some share generators encode the already URL-encoded JSON a second time.
+                        try
+                        {
+                            var decodedAgain = Uri.UnescapeDataString(extra);
+                            if (!decodedAgain.Equals(extra, StringComparison.Ordinal))
+                                extraNode = JsonNode.Parse(decodedAgain);
+                        }
+                        catch { }
+                    }
+                    if (extraNode is null)
+                        throw new InvalidDataException("XHTTP: параметр extra содержит неверный JSON.");
+                    xhttp["extra"] = extraNode;
                 }
                 stream["xhttpSettings"] = xhttp;
                 break;
@@ -310,7 +324,8 @@ public static class XrayConfigBuilder
 
     private static byte[] DecodeBase64(string value)
     {
-        value = WebUtility.UrlDecode(value).Trim().Replace('-', '+').Replace('_', '/');
+        // VMess payload is opaque Base64, not application/x-www-form-urlencoded data.
+        value = Uri.UnescapeDataString(value).Trim().Replace('-', '+').Replace('_', '/');
         value = value.PadRight(value.Length + ((4 - value.Length % 4) % 4), '=');
         try { return Convert.FromBase64String(value); }
         catch (FormatException ex) { throw new InvalidDataException("VMESS: неверный Base64.", ex); }
