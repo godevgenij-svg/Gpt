@@ -8,7 +8,7 @@ namespace GreyVPN.Services;
 
 public static class OpenVpnRealTester
 {
-    private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(18);
+    private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(20);
     private static readonly SemaphoreSlim OpenVpnGate = new(1, 1);
     private const string ProbeUrl = "https://1.1.1.1/cdn-cgi/trace";
 
@@ -63,7 +63,7 @@ public static class OpenVpnRealTester
         }
 
         using var overall = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        overall.CancelAfter(TimeSpan.FromSeconds(32));
+        overall.CancelAfter(TimeSpan.FromSeconds(36));
         var token = overall.Token;
         var tempDir = Path.Combine(Path.GetTempPath(), "GreyVPN", "openvpn", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempDir);
@@ -160,7 +160,7 @@ public static class OpenVpnRealTester
     private static void HandleLine(string? line, StringBuilder log, TaskCompletionSource connected)
     {
         if (string.IsNullOrWhiteSpace(line)) return;
-        lock (log) { if (log.Length < 32_000) log.AppendLine(line); }
+        lock (log) { if (log.Length < 48_000) log.AppendLine(line); }
         if (line.Contains("Initialization Sequence Completed", StringComparison.OrdinalIgnoreCase)) connected.TrySetResult();
     }
 
@@ -177,13 +177,26 @@ public static class OpenVpnRealTester
     private static void ClassifyFailure(VpnProfile profile, string log, int? exitCode)
     {
         var suffix = exitCode is null ? string.Empty : $" ExitCode={exitCode}.";
-        if (log.Contains("AUTH_FAILED", StringComparison.OrdinalIgnoreCase))
+
+        if (ContainsAny(log,
+                "Data channel cipher negotiation failed", "no shared cipher", "failed to negotiate cipher",
+                "Cipher algorithm", "unsupported cipher", "data-ciphers-fallback") ||
+            (log.Contains("AUTH_FAILED", StringComparison.OrdinalIgnoreCase) && log.Contains("cipher", StringComparison.OrdinalIgnoreCase)))
+        {
+            profile.RealStatus = "CIPHER ERROR";
+            profile.RealError = Shorten(LastUsefulLines(log)) + suffix;
+        }
+        else if (log.Contains("AUTH_FAILED", StringComparison.OrdinalIgnoreCase))
         {
             profile.RealStatus = "AUTH ERROR";
-            profile.RealError = "OpenVPN: AUTH_FAILED." + suffix;
+            profile.RealError = Shorten(LastUsefulLines(log)) + suffix;
         }
-        // TLS must be checked before driver errors. OpenVPN logs often mention Wintun
-        // during normal startup, which made v0.5 misclassify TLS failures as DRIVER ERROR.
+        else if (ContainsAny(log, "Options error", "Unrecognized option", "unknown option", "Cannot load"))
+        {
+            profile.RealStatus = "CONFIG ERROR";
+            profile.RealError = Shorten(LastUsefulLines(log)) + suffix;
+        }
+        // TLS must be checked before driver errors. Normal startup mentions Wintun too.
         else if (ContainsAny(log, "TLS Error", "TLS key negotiation failed", "TLS handshake failed", "VERIFY ERROR"))
         {
             profile.RealStatus = "TLS ERROR";
@@ -218,7 +231,7 @@ public static class OpenVpnRealTester
     private static string LastUsefulLines(string value)
     {
         var lines = value.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
-            .Where(x => !string.IsNullOrWhiteSpace(x)).TakeLast(8);
+            .Where(x => !string.IsNullOrWhiteSpace(x)).TakeLast(10);
         var text = string.Join(" | ", lines);
         return string.IsNullOrWhiteSpace(text) ? "OpenVPN не завершил подключение." : text;
     }
@@ -246,6 +259,6 @@ public static class OpenVpnRealTester
     private static string Shorten(string value)
     {
         value = value.Replace('\r', ' ').Replace('\n', ' ').Trim();
-        return value.Length <= 1100 ? value : value[..1100];
+        return value.Length <= 1400 ? value : value[..1400];
     }
 }
