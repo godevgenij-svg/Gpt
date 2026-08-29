@@ -121,8 +121,8 @@ Console.WriteLine("OK ThroneCore AmneziaWG CheckConfig over named-pipe IPC");
 
 // Regression for the v0.8 field report: CheckConfig passed but Start panicked because the pinned
 // upstream dereferences omitted proto2 optional bool fields. TestAsync performs the exact production
-// path and locates the engine relative to AppContext.BaseDirectory, so stage the already-packaged
-// Throne runtime beside the smoke-test executable rather than substituting a different binary.
+// path. Stage the already-packaged Throne runtime beside the smoke-test executable and a real .conf
+// source file because production BuildAsync intentionally reloads imported WG/AWG profiles by SourcePath.
 var packagedThroneDir = Path.GetDirectoryName(core) ?? throw new InvalidOperationException("Packaged Throne directory is unavailable.");
 var runtimeThroneDir = Path.Combine(AppContext.BaseDirectory, "engines", "throne");
 Directory.CreateDirectory(runtimeThroneDir);
@@ -133,6 +133,8 @@ foreach (var fileName in new[] { "ThroneCore.exe", "Throne.exe", "ThroneCoreUpst
     File.Copy(source, Path.Combine(runtimeThroneDir, fileName), overwrite: true);
 }
 
+var lifecycleConf = Path.Combine(Path.GetTempPath(), "GreyVPN_ThroneSmoke_" + Guid.NewGuid().ToString("N") + ".conf");
+await File.WriteAllTextAsync(lifecycleConf, awgCommon, Encoding.UTF8);
 try
 {
     // The reserved TEST-NET endpoint cannot provide internet, so TIMEOUT/NO INTERNET is the expected
@@ -144,7 +146,8 @@ try
         Type = "AmneziaWG",
         Endpoint = "198.51.100.12:51820",
         Transport = "udp",
-        RawValue = awgCommon
+        SourcePath = lifecycleConf,
+        RawValue = string.Empty
     };
     await ThroneCoreWireGuardTester.TestAsync(lifecycleProfile, CancellationToken.None);
     var lifecycleOk = lifecycleProfile.RealStatus is "TIMEOUT" or "NO INTERNET" or "РАБОТАЕТ";
@@ -160,8 +163,8 @@ try
 }
 finally
 {
-    try { Directory.Delete(Path.Combine(AppContext.BaseDirectory, "engines"), recursive: true); }
-    catch { }
+    try { File.Delete(lifecycleConf); } catch { }
+    try { Directory.Delete(Path.Combine(AppContext.BaseDirectory, "engines"), recursive: true); } catch { }
 }
 
 Console.WriteLine("ALL THRONECORE SMOKE TESTS PASSED");
