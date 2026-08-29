@@ -36,6 +36,12 @@ public static class DiagnosticsService
     private static readonly Regex QuerySecret = new(
         @"(?i)(?<prefix>[?&](?:password|passwd|pass|token|secret|uuid|id|key|psk|privatekey|presharedkey)=)[^&#\s]+",
         RegexOptions.Compiled);
+    private static readonly Regex WindowsUserRoot = new(
+        @"(?i)(?<prefix>\b[A-Z]:\\Users\\)[^\\\r\n\t|\"']+",
+        RegexOptions.Compiled);
+    private static readonly Regex UnixUserRoot = new(
+        @"(?i)(?<prefix>/(?:home|Users)/)[^/\s|\"']+",
+        RegexOptions.Compiled);
 
     private static string? _sessionRoot;
     private static string? _appLogPath;
@@ -127,6 +133,8 @@ public static class DiagnosticsService
         text = UriUserInfo.Replace(text, "${scheme}://[CREDENTIAL REDACTED]@");
         text = VmessUri.Replace(text, "vmess://[REDACTED]");
         text = QuerySecret.Replace(text, "${prefix}[REDACTED]");
+        text = WindowsUserRoot.Replace(text, "${prefix}[USER]");
+        text = UnixUserRoot.Replace(text, "${prefix}[USER]");
         return text;
     }
 
@@ -144,7 +152,7 @@ public static class DiagnosticsService
             var rows = profiles.Select(ToReportRow).ToList();
             File.WriteAllText(Path.Combine(stage, "README_SEND_TO_CHATGPT.txt"),
                 "Пришлите REPORT_FOR_CHATGPT_LATEST.zip в чат.\r\n" +
-                "Архив не содержит исходные VPN-конфиги, RawValue, полные пути файлов, приватные ключи, UUID и пароли.\r\n" +
+                "Архив не содержит исходные VPN-конфиги, RawValue, имена пользовательских каталогов, приватные ключи, UUID и пароли.\r\n" +
                 "В нём находятся результаты тестов, системная информация без имени пользователя и подробные очищенные логи движков.\r\n",
                 new UTF8Encoding(false));
 
