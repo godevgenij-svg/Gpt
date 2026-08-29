@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using GreyVPN.Models;
 using GreyVPN.Services;
 
 if (args.Length != 1) throw new ArgumentException("Usage: GreyVPN.ThroneSmoke <ThroneCore.exe>");
@@ -117,6 +118,31 @@ var awgCommonBuilt = await ThroneWireGuardConfigBuilder.BuildFromTextAsync(awgCo
 var awgCheck = await ThroneCoreWireGuardTester.CheckConfigWithCoreAsync(core, awgCommonBuilt.Json);
 if (!string.IsNullOrWhiteSpace(awgCheck)) throw new Exception("ThroneCore rejected generated AmneziaWG config: " + awgCheck);
 Console.WriteLine("OK ThroneCore AmneziaWG CheckConfig over named-pipe IPC");
+
+// Regression for the v0.8 field report: CheckConfig passed but Start panicked because the pinned
+// upstream dereferences omitted proto2 optional bool fields. TestAsync performs the real production
+// path Start -> local mixed-proxy probe -> Stop. The reserved TEST-NET endpoint cannot provide
+// internet, so TIMEOUT/NO INTERNET is the expected outcome; ENGINE/CONFIG/CONNECT errors mean the
+// lifecycle itself regressed before the probe.
+var lifecycleProfile = new VpnProfile
+{
+    Name = "CI-AWG-StartStop",
+    Type = "AmneziaWG",
+    Endpoint = "198.51.100.12:51820",
+    Transport = "udp",
+    RawValue = awgCommon
+};
+await ThroneCoreWireGuardTester.TestAsync(lifecycleProfile, CancellationToken.None);
+var lifecycleOk = lifecycleProfile.RealStatus is "TIMEOUT" or "NO INTERNET" or "РАБОТАЕТ";
+if (!lifecycleOk)
+{
+    throw new Exception($"ThroneCore Start/Stop lifecycle failed before probe. Status={lifecycleProfile.RealStatus}; Error={lifecycleProfile.RealError}");
+}
+if (lifecycleProfile.RealError.Contains("panic", StringComparison.OrdinalIgnoreCase))
+{
+    throw new Exception("ThroneCore Start/Stop lifecycle still contains a core panic: " + lifecycleProfile.RealError);
+}
+Console.WriteLine($"OK ThroneCore Start -> probe -> Stop lifecycle ({lifecycleProfile.RealStatus})");
 Console.WriteLine("ALL THRONECORE SMOKE TESTS PASSED");
 
 static void Must(bool condition, string name)
