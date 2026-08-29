@@ -40,8 +40,10 @@ jobs:
       - name: Self-test packaged parser
         shell: pwsh
         run: |
-          & .\dist\MEMS_Catalog_Parser\MEMS_Catalog_Parser.exe --self-test
-          if ($LASTEXITCODE -ne 0) { throw "Parser self-test failed: $LASTEXITCODE" }
+          $exe = (Resolve-Path .\dist\MEMS_Catalog_Parser\MEMS_Catalog_Parser.exe).Path
+          $p = Start-Process -FilePath $exe -ArgumentList '--self-test' -Wait -PassThru
+          Write-Host "Self-test exit code: $($p.ExitCode)"
+          if ($p.ExitCode -ne 0) { throw "Parser self-test failed: $($p.ExitCode)" }
 
       - name: Package
         shell: pwsh
