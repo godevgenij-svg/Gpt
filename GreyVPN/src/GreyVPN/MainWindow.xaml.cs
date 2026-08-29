@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Text;
@@ -21,10 +22,12 @@ public partial class MainWindow : Window
 
     public MainWindow()
     {
+        DiagnosticsService.Initialize();
         InitializeComponent();
         DataContext = this;
         Loaded += MainWindow_Loaded;
         Closing += MainWindow_Closing;
+        DiagnosticsService.Log("UI", "Main window created.");
     }
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
@@ -36,13 +39,23 @@ public partial class MainWindow : Window
             Profiles.Add(profile);
         }
         _profilesView = CollectionViewSource.GetDefaultView(Profiles);
+        DiagnosticsService.Log("STORE", $"Loaded profiles: {Profiles.Count}");
         RefreshStatus($"Готово. Профилей: {Profiles.Count}");
     }
 
     private void MainWindow_Closing(object? sender, CancelEventArgs e)
     {
         _testCts?.Cancel();
-        try { ProfileStore.SaveAsync(Profiles).GetAwaiter().GetResult(); } catch { }
+        DiagnosticsService.Log("APP", "Window closing. Cancelling active tests and saving state.");
+        try { ProfileStore.SaveAsync(Profiles).GetAwaiter().GetResult(); }
+        catch (Exception ex) { DiagnosticsService.Log("STORE", $"Save on close failed: {ex.GetType().Name}: {ex.Message}"); }
+
+        // If any real test has ever run, leave a final report even when the window is closed mid-session.
+        if (Profiles.Any(p => p.LastRealTested is not null))
+        {
+            try { DiagnosticsService.CreateChatGptReportAsync(Profiles, "app-closing").GetAwaiter().GetResult(); }
+            catch (Exception ex) { DiagnosticsService.Log("REPORT", $"Report on close failed: {ex.GetType().Name}: {ex.Message}"); }
+        }
     }
 
     private async void ImportFiles_Click(object sender, RoutedEventArgs e)
@@ -72,6 +85,7 @@ public partial class MainWindow : Window
         try
         {
             RefreshStatus("Импорт...");
+            DiagnosticsService.Log("IMPORT", "Import started.");
             var imported = await ProfileImporter.ImportFilesAsync(paths);
             var existing = new HashSet<string>(Profiles.Select(BuildUiIdentity), StringComparer.OrdinalIgnoreCase);
             var added = 0;
@@ -86,10 +100,12 @@ public partial class MainWindow : Window
             }
             await ProfileStore.SaveAsync(Profiles);
             _profilesView?.Refresh();
+            DiagnosticsService.Log("IMPORT", $"Import completed. Parsed={imported.Count}; Added={added}; Total={Profiles.Count}");
             RefreshStatus($"Импортировано новых: {added}. Всего: {Profiles.Count}");
         }
         catch (Exception ex)
         {
+            DiagnosticsService.Log("IMPORT", $"Import failed: {ex.GetType().Name}: {ex.Message}");
             System.Windows.MessageBox.Show(this, ex.Message, "Ошибка импорта", MessageBoxButton.OK, MessageBoxImage.Error);
             RefreshStatus("Ошибка импорта");
         }
@@ -111,11 +127,17 @@ public partial class MainWindow : Window
         using var gate = new SemaphoreSlim(TestConcurrency);
         try
         {
+            DiagnosticsService.Log("PRETEST", $"Started. Profiles={profiles.Count}; Concurrency={TestConcurrency}");
             RefreshStatus($"Предтест 0/{profiles.Count}. Параллельно: {TestConcurrency}");
             var tasks = profiles.Select(async profile =>
             {
                 await gate.WaitAsync(ct);
-                try { await ProfileTester.TestAsync(profile, ct); }
+                try
+                {
+                    DiagnosticsService.Log("PRETEST", "Profile start", profile);
+                    await ProfileTester.TestAsync(profile, ct);
+                    DiagnosticsService.Log("PRETEST", $"Profile done. Status={profile.Status}; TCP={profile.TcpConnectMs}; ICMP={profile.PingMs}; Error={profile.Error}", profile);
+                }
                 finally
                 {
                     gate.Release();
@@ -124,9 +146,19 @@ public partial class MainWindow : Window
                 }
             }).ToArray();
             await Task.WhenAll(tasks);
+            DiagnosticsService.Log("PRETEST", $"Completed. Profiles={profiles.Count}; Candidates={profiles.Count(ProfileTester.IsRealTestCandidate)}");
             RefreshStatus($"Предтест завершён: {profiles.Count}. Допущены к real-test: {profiles.Count(ProfileTester.IsRealTestCandidate)}");
         }
-        catch (OperationCanceledException) { RefreshStatus($"Предтест остановлен: {completed}/{profiles.Count}"); }
+        catch (OperationCanceledException)
+        {
+            DiagnosticsService.Log("PRETEST", $"Cancelled. Completed={completed}/{profiles.Count}");
+            RefreshStatus($"Предтест остановлен: {completed}/{profiles.Count}");
+        }
+        catch (Exception ex)
+        {
+            DiagnosticsService.Log("PRETEST", $"Unhandled failure: {ex.GetType().Name}: {ex.Message}");
+            throw;
+        }
         finally
         {
             _profilesView?.Refresh();
@@ -134,7 +166,11 @@ public partial class MainWindow : Window
         }
     }
 
-    private void Stop_Click(object sender, RoutedEventArgs e) => _testCts?.Cancel();
+    private void Stop_Click(object sender, RoutedEventArgs e)
+    {
+        DiagnosticsService.Log("UI", "Stop requested by user.");
+        _testCts?.Cancel();
+    }
 
     private async void DeleteSelected_Click(object sender, RoutedEventArgs e)
     {
@@ -142,6 +178,7 @@ public partial class MainWindow : Window
         foreach (var profile in selected) Profiles.Remove(profile);
         await ProfileStore.SaveAsync(Profiles);
         _profilesView?.Refresh();
+        DiagnosticsService.Log("UI", $"Profiles deleted: {selected.Count}; Remaining={Profiles.Count}");
         RefreshStatus($"Удалено: {selected.Count}. Осталось: {Profiles.Count}");
     }
 
@@ -188,9 +225,43 @@ public partial class MainWindow : Window
         try
         {
             ExportResponsiveZip(dialog.FileName, responsive);
+            DiagnosticsService.Log("EXPORT", $"Candidate export created. Count={responsive.Count}; Working={responsive.Count(RealConnectionTester.IsRealWorking)}");
             RefreshStatus($"Экспортировано: {responsive.Count}; реально рабочие среди них: {responsive.Count(RealConnectionTester.IsRealWorking)}");
         }
-        catch (Exception ex) { System.Windows.MessageBox.Show(this, ex.Message, "Ошибка экспорта", MessageBoxButton.OK, MessageBoxImage.Error); }
+        catch (Exception ex)
+        {
+            DiagnosticsService.Log("EXPORT", $"Candidate export failed: {ex.GetType().Name}: {ex.Message}");
+            System.Windows.MessageBox.Show(this, ex.Message, "Ошибка экспорта", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private async void CreateChatGptReport_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            RefreshStatus("Создаю диагностический ZIP для ChatGPT...");
+            var path = await DiagnosticsService.CreateChatGptReportAsync(Profiles, "manual-button");
+            RefreshStatus($"Отчёт готов: {path}");
+            try
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = "explorer.exe",
+                    Arguments = $"/select,\"{path}\"",
+                    UseShellExecute = true
+                });
+            }
+            catch { }
+            System.Windows.MessageBox.Show(this,
+                $"Готово. Пришли мне этот файл:\n\n{path}\n\nПроводник уже открыл папку с ZIP.",
+                "Отчёт для ChatGPT", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            DiagnosticsService.Log("REPORT", $"Manual report failed: {ex.GetType().Name}: {ex.Message}");
+            System.Windows.MessageBox.Show(this, ex.Message, "Ошибка отчёта", MessageBoxButton.OK, MessageBoxImage.Error);
+            RefreshStatus("Не удалось создать отчёт");
+        }
     }
 
     private static void ExportResponsiveZip(string zipPath, IReadOnlyList<VpnProfile> profiles)
