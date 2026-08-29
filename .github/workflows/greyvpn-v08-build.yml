@@ -133,11 +133,11 @@ jobs:
           GOOS=windows GOARCH=amd64 ./script/build_go.sh
           test -f "$DEST/ThroneCore.exe"
 
-      - name: Preserve upstream ThroneCore and build parent launchers
+      - name: Preserve upstream ThroneCore and build IPC bridge launchers
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $dir = '.\GreyVPN\publish\engines\throne'
+          $dir = (Resolve-Path '.\GreyVPN\publish\engines\throne').Path
           $core = Join-Path $dir 'ThroneCore.exe'
           $upstream = Join-Path $dir 'ThroneCoreUpstream.exe'
           if (-not (Test-Path $core)) { throw 'Upstream ThroneCore.exe missing before launcher packaging' }
@@ -145,10 +145,19 @@ jobs:
           Move-Item $core $upstream -Force
           $after = (Get-FileHash $upstream -Algorithm SHA256).Hash
           if ($before -ne $after) { throw 'Upstream ThroneCore hash changed while preserving binary' }
-          go build -trimpath -ldflags='-s -w' -o (Join-Path $dir 'Throne.exe') .\GreyVPN\third_party\throne-launcher\main.go
-          if ($LASTEXITCODE -ne 0) { throw "Throne launcher build failed: $LASTEXITCODE" }
+
+          $launcherDir = '.\throne-src\core\server\greyvpn_launcher'
+          New-Item -ItemType Directory -Force -Path $launcherDir | Out-Null
+          Copy-Item '.\GreyVPN\third_party\throne-launcher\main.go' (Join-Path $launcherDir 'main.go') -Force
+          Push-Location '.\throne-src\core\server'
+          try {
+            go build -trimpath -ldflags='-s -w' -o (Join-Path $dir 'Throne.exe') .\greyvpn_launcher
+            if ($LASTEXITCODE -ne 0) { throw "Throne IPC bridge build failed: $LASTEXITCODE" }
+          }
+          finally { Pop-Location }
+
           Copy-Item (Join-Path $dir 'Throne.exe') (Join-Path $dir 'ThroneCore.exe') -Force
-          if (-not (Test-Path (Join-Path $dir 'Throne.exe'))) { throw 'Throne.exe launcher missing' }
+          if (-not (Test-Path (Join-Path $dir 'Throne.exe'))) { throw 'Throne.exe bridge missing' }
           if (-not (Test-Path (Join-Path $dir 'ThroneCore.exe'))) { throw 'ThroneCore.exe compatibility shim missing' }
           Write-Host "Preserved upstream ThroneCore SHA256: $after"
 
@@ -165,9 +174,10 @@ jobs:
           Source: https://github.com/throneproj/Throne/tree/583fa089f6e969a08a25fc7da2c118a2f4947849
           License: GNU GPL v3.0
           Upstream binary is preserved byte-for-byte as ThroneCoreUpstream.exe.
-          Throne.exe and ThroneCore.exe are tiny GreyVPN launchers built from GreyVPN/third_party/throne-launcher/main.go.
-          The launch chain is GreyVPN -> ThroneCore.exe shim -> Throne.exe parent -> ThroneCoreUpstream.exe.
-          This keeps the upstream Windows parent-name check intact without using the Throne debug build.
+          Throne.exe and ThroneCore.exe are GreyVPN IPC bridge launchers built from GreyVPN/third_party/throne-launcher/main.go using the pinned ThroneCore Go module/dependencies.
+          Launch chain: GreyVPN -> ThroneCore.exe shim -> Throne.exe pipe owner/parent -> ThroneCoreUpstream.exe.
+          Throne.exe owns the inner named pipe required by ThroneCore and bridges bytes to GreyVPN's outer pipe.
+          This keeps both upstream Windows parent and named-pipe-server PID checks intact without using the Throne debug build.
           GreyVPN v0.8 uses the core headlessly for WireGuard/AmneziaWG real tests without system TUN.
           "@ | Set-Content -Encoding UTF8 (Join-Path $dir 'THIRD_PARTY_ThroneCore.txt')
 
