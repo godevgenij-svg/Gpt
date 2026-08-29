@@ -130,23 +130,34 @@ public static partial class ProfileImporter
 
     private static IEnumerable<VpnProfile> ParseUriList(string path, string text)
     {
-        var lines = text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
-            .Select(x => x.Trim())
-            .Where(x => x.Length > 0 && !x.StartsWith('#'));
+        var parsed = ParseUriLines(text).ToList();
 
-        var any = false;
-        foreach (var line in lines)
+        // A large part of public V2Ray subscriptions is a Base64-encoded list of links.
+        if (parsed.Count == 0 && TryDecodeBase64(text.Trim(), out var decoded))
+            parsed = ParseUriLines(decoded).ToList();
+
+        if (parsed.Count == 0)
         {
-            if (!TryParseProxyUri(line, out var profile))
-                continue;
+            yield return ParseGeneric(path, "TXT", text);
+            yield break;
+        }
 
-            any = true;
+        foreach (var profile in parsed)
+        {
             profile.SourcePath = path;
             yield return profile;
         }
+    }
 
-        if (!any)
-            yield return ParseGeneric(path, "TXT", text);
+    private static IEnumerable<VpnProfile> ParseUriLines(string text)
+    {
+        foreach (var line in text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                     .Select(x => x.Trim())
+                     .Where(x => x.Length > 0 && !x.StartsWith('#')))
+        {
+            if (TryParseProxyUri(line, out var profile))
+                yield return profile;
+        }
     }
 
     private static bool TryParseProxyUri(string raw, out VpnProfile profile)
@@ -165,13 +176,12 @@ public static partial class ProfileImporter
             return true;
 
         string name = scheme.ToUpperInvariant();
-        string endpoint = string.Empty;
+        string endpoint;
 
-        if (Uri.TryCreate(raw, UriKind.Absolute, out var uri))
+        if (Uri.TryCreate(raw, UriKind.Absolute, out var uri) && !string.IsNullOrWhiteSpace(uri.Host))
         {
-            var host = uri.Host;
-            var port = uri.IsDefaultPort ? string.Empty : uri.Port.ToString();
-            endpoint = JoinEndpoint(host, port);
+            var port = uri.Port > 0 ? uri.Port : DefaultPortForScheme(scheme);
+            endpoint = port > 0 ? JoinEndpoint(uri.Host, port.ToString()) : uri.Host;
             if (!string.IsNullOrWhiteSpace(uri.Fragment))
                 name = Uri.UnescapeDataString(uri.Fragment.TrimStart('#'));
         }
@@ -249,7 +259,7 @@ public static partial class ProfileImporter
         text = string.Empty;
         try
         {
-            var normalized = value.Replace('-', '+').Replace('_', '/');
+            var normalized = WebUtility.UrlDecode(value).Trim().Replace('-', '+').Replace('_', '/');
             var mod = normalized.Length % 4;
             if (mod == 2) normalized += "==";
             else if (mod == 3) normalized += "=";
@@ -304,6 +314,14 @@ public static partial class ProfileImporter
             return false;
 
         var value = endpoint.Trim();
+
+        // A bare IPv6 address contains colons but no port. Handle it before host:port parsing.
+        if (IPAddress.TryParse(value, out _))
+        {
+            host = value;
+            return true;
+        }
+
         if (value.StartsWith('['))
         {
             var close = value.IndexOf(']');
@@ -311,20 +329,27 @@ public static partial class ProfileImporter
                 return false;
 
             host = value[1..close];
-            if (close + 2 <= value.Length && value[close + 1] == ':' && int.TryParse(value[(close + 2)..], out port))
+            if (close == value.Length - 1)
+                return IPAddress.TryParse(host, out _);
+
+            if (close + 2 <= value.Length && value[close + 1] == ':' &&
+                int.TryParse(value[(close + 2)..], out port) && port is > 0 and <= 65535)
                 return true;
 
-            return IPAddress.TryParse(host, out _);
+            return false;
         }
 
         var colon = value.LastIndexOf(':');
         if (colon > 0 && int.TryParse(value[(colon + 1)..], out port))
         {
+            if (port is < 1 or > 65535)
+                return false;
             host = value[..colon];
             return !string.IsNullOrWhiteSpace(host);
         }
 
         host = value;
+        port = 0;
         return true;
     }
 
@@ -344,12 +369,21 @@ public static partial class ProfileImporter
 
     private static string GuessTransport(string raw)
     {
+        if (raw.Contains("type=xhttp", StringComparison.OrdinalIgnoreCase) || raw.Contains("type=splithttp", StringComparison.OrdinalIgnoreCase)) return "xhttp";
+        if (raw.Contains("type=httpupgrade", StringComparison.OrdinalIgnoreCase) || raw.Contains("type=http-upgrade", StringComparison.OrdinalIgnoreCase)) return "httpupgrade";
         if (raw.Contains("type=grpc", StringComparison.OrdinalIgnoreCase)) return "grpc";
-        if (raw.Contains("type=ws", StringComparison.OrdinalIgnoreCase)) return "ws";
-        if (raw.Contains("type=tcp", StringComparison.OrdinalIgnoreCase)) return "tcp";
+        if (raw.Contains("type=ws", StringComparison.OrdinalIgnoreCase) || raw.Contains("type=websocket", StringComparison.OrdinalIgnoreCase)) return "ws";
+        if (raw.Contains("type=tcp", StringComparison.OrdinalIgnoreCase) || raw.Contains("type=raw", StringComparison.OrdinalIgnoreCase)) return "tcp";
         if (raw.StartsWith("hysteria2://", StringComparison.OrdinalIgnoreCase) || raw.StartsWith("hy2://", StringComparison.OrdinalIgnoreCase)) return "udp";
         return "tcp";
     }
+
+    private static int DefaultPortForScheme(string scheme) => scheme.ToLowerInvariant() switch
+    {
+        "vless" or "trojan" or "hysteria2" or "hy2" or "https" => 443,
+        "http" => 80,
+        _ => 0
+    };
 
     private static string JoinEndpoint(string host, string port)
     {
