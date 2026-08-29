@@ -133,20 +133,42 @@ jobs:
           GOOS=windows GOARCH=amd64 ./script/build_go.sh
           test -f "$DEST/ThroneCore.exe"
 
+      - name: Preserve upstream ThroneCore and build parent launchers
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = '.\GreyVPN\publish\engines\throne'
+          $core = Join-Path $dir 'ThroneCore.exe'
+          $upstream = Join-Path $dir 'ThroneCoreUpstream.exe'
+          if (-not (Test-Path $core)) { throw 'Upstream ThroneCore.exe missing before launcher packaging' }
+          $before = (Get-FileHash $core -Algorithm SHA256).Hash
+          Move-Item $core $upstream -Force
+          $after = (Get-FileHash $upstream -Algorithm SHA256).Hash
+          if ($before -ne $after) { throw 'Upstream ThroneCore hash changed while preserving binary' }
+          go build -trimpath -ldflags='-s -w' -o (Join-Path $dir 'Throne.exe') .\GreyVPN\third_party\throne-launcher\main.go
+          if ($LASTEXITCODE -ne 0) { throw "Throne launcher build failed: $LASTEXITCODE" }
+          Copy-Item (Join-Path $dir 'Throne.exe') (Join-Path $dir 'ThroneCore.exe') -Force
+          if (-not (Test-Path (Join-Path $dir 'Throne.exe'))) { throw 'Throne.exe launcher missing' }
+          if (-not (Test-Path (Join-Path $dir 'ThroneCore.exe'))) { throw 'ThroneCore.exe compatibility shim missing' }
+          Write-Host "Preserved upstream ThroneCore SHA256: $after"
+
       - name: Add ThroneCore license and source notice
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $dir = '.\GreyVPN\publish\engines\throne'
-          if (-not (Test-Path (Join-Path $dir 'ThroneCore.exe'))) { throw 'ThroneCore.exe missing after build' }
+          if (-not (Test-Path (Join-Path $dir 'ThroneCoreUpstream.exe'))) { throw 'ThroneCoreUpstream.exe missing after packaging' }
           Copy-Item .\throne-src\LICENSE (Join-Path $dir 'LICENSE_Throne_GPLv3.txt') -Force
           @"
           ThroneCore from throneproj/Throne
           Pinned source commit: 583fa089f6e969a08a25fc7da2c118a2f4947849
           Source: https://github.com/throneproj/Throne/tree/583fa089f6e969a08a25fc7da2c118a2f4947849
           License: GNU GPL v3.0
-          GreyVPN v0.8 uses ThroneCore as a separate headless process for WireGuard/AmneziaWG real tests.
-          The corresponding source and exact build script are available at the source URL/commit above.
+          Upstream binary is preserved byte-for-byte as ThroneCoreUpstream.exe.
+          Throne.exe and ThroneCore.exe are tiny GreyVPN launchers built from GreyVPN/third_party/throne-launcher/main.go.
+          The launch chain is GreyVPN -> ThroneCore.exe shim -> Throne.exe parent -> ThroneCoreUpstream.exe.
+          This keeps the upstream Windows parent-name check intact without using the Throne debug build.
+          GreyVPN v0.8 uses the core headlessly for WireGuard/AmneziaWG real tests without system TUN.
           "@ | Set-Content -Encoding UTF8 (Join-Path $dir 'THIRD_PARTY_ThroneCore.txt')
 
       - name: Verify packaged engines and version
@@ -160,6 +182,8 @@ jobs:
             '.\GreyVPN\publish\engines\openvpn\openvpn.exe',
             '.\GreyVPN\publish\engines\openvpn\wintun.dll',
             '.\GreyVPN\publish\engines\throne\ThroneCore.exe',
+            '.\GreyVPN\publish\engines\throne\Throne.exe',
+            '.\GreyVPN\publish\engines\throne\ThroneCoreUpstream.exe',
             '.\GreyVPN\publish\engines\throne\LICENSE_Throne_GPLv3.txt'
           )
           foreach ($path in $required) { if (-not (Test-Path $path)) { throw "Missing packaged file: $path" } }
