@@ -11,7 +11,9 @@ internal static class V09Smoke
         TestOpenVpnVault();
         TestAmneziaWgTestConfig();
         TestXrayRemovedAllowInsecure();
-        Console.WriteLine("OK GreyVPN v0.9.1 regression smoke");
+        TestVmessOpaqueBase64();
+        TestDoubleEncodedXhttpExtra();
+        Console.WriteLine("OK GreyVPN v0.9.1.2 regression smoke");
     }
 
     private static void TestConfigVault()
@@ -92,8 +94,46 @@ internal static class V09Smoke
         Must(normalized.Warning.Contains("удалил allowInsecure", StringComparison.OrdinalIgnoreCase), "Xray compatibility warning is recorded");
     }
 
+    private static void TestVmessOpaqueBase64()
+    {
+        const string payload = "eyJ2IjoiMiIsInBzIjoidGVzdNC+IiwiYWRkIjoiZXhhbXBsZS5jb20iLCJwb3J0IjoiNDQzIiwiaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJhaWQiOiIwIiwibmV0Ijoid3MiLCJ0eXBlIjoibm9uZSIsImhvc3QiOiJleGFtcGxlLmNvbSIsInBhdGgiOiIvIiwidGxzIjoidGxzIiwic2N5IjoiYXV0byJ9";
+        Must(payload.Contains('+'), "VMess regression payload actually contains plus");
+        var temp = Path.Combine(Path.GetTempPath(), "GreyVPN-v0912-vmess-" + Guid.NewGuid().ToString("N") + ".txt");
+        try
+        {
+            File.WriteAllText(temp, "vmess://" + payload);
+            var imported = ProfileImporter.ImportFilesAsync(new[] { temp }).GetAwaiter().GetResult();
+            Must(imported.Count == 1, "VMess plus payload imports as one profile");
+            var p = imported[0];
+            Must(p.Type == "VMESS", "VMess plus payload keeps VMESS type");
+            Must(p.Endpoint == "example.com:443", "VMess plus payload decodes endpoint");
+            Must(p.Transport == "ws", "VMess plus payload decodes transport");
+            var built = XrayConfigBuilder.Build(p, 19992);
+            Must(built.Contains("example.com", StringComparison.Ordinal), "Xray builder decodes the same VMess plus payload");
+        }
+        finally
+        {
+            try { if (File.Exists(temp)) File.Delete(temp); } catch { }
+        }
+    }
+
+    private static void TestDoubleEncodedXhttpExtra()
+    {
+        const string id = "00000000-0000-0000-0000-000000000001";
+        const string extra = "{\"noGRPCHeader\":true}";
+        var twice = Uri.EscapeDataString(Uri.EscapeDataString(extra));
+        var profile = new VpnProfile
+        {
+            Name = "xhttp-double-extra",
+            Type = "VLESS",
+            RawValue = $"vless://{id}@example.com:443?encryption=none&security=tls&type=xhttp&sni=example.com&extra={twice}"
+        };
+        var built = XrayConfigBuilder.Build(profile, 19993);
+        Must(built.Contains("noGRPCHeader", StringComparison.Ordinal), "double URL-encoded XHTTP extra is parsed");
+    }
+
     private static void Must(bool condition, string message)
     {
-        if (!condition) throw new InvalidOperationException("V0.9.1 SMOKE FAILED: " + message);
+        if (!condition) throw new InvalidOperationException("V0.9.1.2 SMOKE FAILED: " + message);
     }
 }
