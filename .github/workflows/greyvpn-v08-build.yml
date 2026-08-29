@@ -1,0 +1,192 @@
+name: GreyVPN v0.8 ThroneCore Windows build
+
+on:
+  push:
+    branches:
+      - greyvpn-v0.8-thronecore
+    paths:
+      - 'GreyVPN/**'
+      - '.github/workflows/greyvpn-v08-build.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout GreyVPN
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned Throne source
+        uses: actions/checkout@v4
+        with:
+          repository: throneproj/Throne
+          ref: 583fa089f6e969a08a25fc7da2c118a2f4947849
+          path: throne-src
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore .NET projects
+        run: |
+          dotnet restore .\GreyVPN\src\GreyVPN\GreyVPN.csproj
+          dotnet restore .\GreyVPN\tests\GreyVPN.Smoke\GreyVPN.Smoke.csproj
+          dotnet restore .\GreyVPN\tests\GreyVPN.ThroneSmoke\GreyVPN.ThroneSmoke.csproj
+
+      - name: Publish GreyVPN win-x64
+        run: dotnet publish .\GreyVPN\src\GreyVPN\GreyVPN.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o .\GreyVPN\publish
+
+      - name: Bundle sing-box 1.13.19
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = 'https://github.com/SagerNet/sing-box/releases/download/v1.13.19/sing-box-1.13.19-windows-amd64.zip'
+          Invoke-WebRequest -Uri $url -OutFile sing-box.zip
+          Expand-Archive sing-box.zip -DestinationPath sing-box-dist
+          New-Item -ItemType Directory -Force -Path .\GreyVPN\publish\engines | Out-Null
+          $exe = Get-ChildItem sing-box-dist -Recurse -Filter sing-box.exe | Select-Object -First 1
+          if (-not $exe) { throw 'sing-box.exe not found in official archive' }
+          Copy-Item $exe.FullName .\GreyVPN\publish\engines\sing-box.exe
+          .\GreyVPN\publish\engines\sing-box.exe version
+          if ($LASTEXITCODE -ne 0) { throw "sing-box version failed: $LASTEXITCODE" }
+          @"
+          sing-box 1.13.19
+          Source: https://github.com/SagerNet/sing-box
+          License: GPL-3.0-or-later
+          Binary downloaded from the official GitHub release during CI build.
+          "@ | Set-Content -Encoding UTF8 .\GreyVPN\publish\engines\THIRD_PARTY_sing-box.txt
+
+      - name: Bundle verified Xray-core v26.7.28
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = 'https://github.com/XTLS/Xray-core/releases/download/v26.7.28/Xray-windows-64.zip'
+          $expected = 'c7172078fca4711bcd92a4774dcd1822544579c58816197575c47533317fd8d1'
+          Invoke-WebRequest -Uri $url -OutFile xray.zip
+          $actual = (Get-FileHash .\xray.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "Xray SHA256 mismatch. Expected $expected, got $actual" }
+          Expand-Archive .\xray.zip -DestinationPath .\xray-dist
+          $xray = Get-ChildItem .\xray-dist -Recurse -Filter xray.exe | Select-Object -First 1
+          if (-not $xray) { throw 'xray.exe not found in official Xray archive' }
+          $engineDir = '.\GreyVPN\publish\engines\xray'
+          New-Item -ItemType Directory -Force -Path $engineDir | Out-Null
+          Copy-Item (Join-Path $xray.Directory.FullName '*') $engineDir -Recurse -Force
+          & (Join-Path $engineDir 'xray.exe') version
+          if ($LASTEXITCODE -ne 0) { throw "xray.exe version failed: $LASTEXITCODE" }
+          @"
+          Xray-core v26.7.28
+          Source: https://github.com/XTLS/Xray-core/releases/tag/v26.7.28
+          Asset: Xray-windows-64.zip
+          SHA2-256: c7172078fca4711bcd92a4774dcd1822544579c58816197575c47533317fd8d1
+          "@ | Set-Content -Encoding UTF8 (Join-Path $engineDir 'THIRD_PARTY_Xray.txt')
+
+      - name: Bundle OpenVPN 2.6.22 and verified Wintun 0.14.1
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Invoke-WebRequest -Uri 'https://build.openvpn.net/downloads/releases/OpenVPN-2.6.22-I001-amd64.msi' -OutFile openvpn.msi
+          if ((Get-Item .\openvpn.msi).Length -lt 1000000) { throw 'Downloaded OpenVPN MSI is unexpectedly small' }
+          $msi = (Resolve-Path .\openvpn.msi).Path
+          $extract = Join-Path (Get-Location) 'openvpn-dist'
+          New-Item -ItemType Directory -Force -Path $extract | Out-Null
+          $p = Start-Process msiexec.exe -ArgumentList @('/a', $msi, '/qn', "TARGETDIR=$extract") -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "OpenVPN MSI extraction failed: $($p.ExitCode)" }
+          $openvpn = Get-ChildItem $extract -Recurse -Filter openvpn.exe | Select-Object -First 1
+          if (-not $openvpn) { throw 'openvpn.exe not found' }
+          $engineDir = '.\GreyVPN\publish\engines\openvpn'
+          New-Item -ItemType Directory -Force -Path $engineDir | Out-Null
+          Copy-Item (Join-Path $openvpn.Directory.FullName '*') $engineDir -Recurse -Force
+          $wintunExpected = '07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51'
+          Invoke-WebRequest -Uri 'https://www.wintun.net/builds/wintun-0.14.1.zip' -OutFile wintun.zip
+          $actual = (Get-FileHash .\wintun.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $wintunExpected) { throw "Wintun SHA256 mismatch: $actual" }
+          Expand-Archive .\wintun.zip -DestinationPath .\wintun-dist
+          $wintun = Get-ChildItem .\wintun-dist -Recurse -Filter wintun.dll | Where-Object { $_.FullName -match '[\\/]bin[\\/]amd64[\\/]' } | Select-Object -First 1
+          if (-not $wintun) { throw 'AMD64 wintun.dll not found' }
+          Copy-Item $wintun.FullName (Join-Path $engineDir 'wintun.dll') -Force
+          & (Join-Path $engineDir 'openvpn.exe') --version | Select-Object -First 2
+
+      - name: Setup Go for pinned ThroneCore
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.5'
+          cache-dependency-path: throne-src/core/server/go.sum
+
+      - name: Setup protoc for pinned ThroneCore
+        uses: arduino/setup-protoc@v3
+        with:
+          version: '31.1'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install ThroneCore protobuf generators
+        shell: pwsh
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
+
+      - name: Build pinned ThroneCore Windows x64
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd throne-src
+          export DEST="$(cygpath -u "$GITHUB_WORKSPACE/GreyVPN/publish/engines/throne")"
+          GOOS=windows GOARCH=amd64 ./script/build_go.sh
+          test -f "$DEST/ThroneCore.exe"
+
+      - name: Add ThroneCore license and source notice
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = '.\GreyVPN\publish\engines\throne'
+          if (-not (Test-Path (Join-Path $dir 'ThroneCore.exe'))) { throw 'ThroneCore.exe missing after build' }
+          Copy-Item .\throne-src\LICENSE (Join-Path $dir 'LICENSE_Throne_GPLv3.txt') -Force
+          @"
+          ThroneCore from throneproj/Throne
+          Pinned source commit: 583fa089f6e969a08a25fc7da2c118a2f4947849
+          Source: https://github.com/throneproj/Throne/tree/583fa089f6e969a08a25fc7da2c118a2f4947849
+          License: GNU GPL v3.0
+          GreyVPN v0.8 uses ThroneCore as a separate headless process for WireGuard/AmneziaWG real tests.
+          The corresponding source and exact build script are available at the source URL/commit above.
+          "@ | Set-Content -Encoding UTF8 (Join-Path $dir 'THIRD_PARTY_ThroneCore.txt')
+
+      - name: Verify packaged engines and version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $required = @(
+            '.\GreyVPN\publish\GreyVPN.exe',
+            '.\GreyVPN\publish\engines\sing-box.exe',
+            '.\GreyVPN\publish\engines\xray\xray.exe',
+            '.\GreyVPN\publish\engines\openvpn\openvpn.exe',
+            '.\GreyVPN\publish\engines\openvpn\wintun.dll',
+            '.\GreyVPN\publish\engines\throne\ThroneCore.exe',
+            '.\GreyVPN\publish\engines\throne\LICENSE_Throne_GPLv3.txt'
+          )
+          foreach ($path in $required) { if (-not (Test-Path $path)) { throw "Missing packaged file: $path" } }
+          $fv = (Get-Item .\GreyVPN\publish\GreyVPN.exe).VersionInfo.FileVersion
+          Write-Host "GreyVPN FileVersion: $fv"
+          if (-not $fv.StartsWith('0.8.0')) { throw "Unexpected GreyVPN FileVersion: $fv" }
+
+      - name: Run existing GreyVPN smoke tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet run --project .\GreyVPN\tests\GreyVPN.Smoke\GreyVPN.Smoke.csproj -c Release --no-restore -- `
+            .\GreyVPN\publish\engines\xray\xray.exe `
+            .\GreyVPN\publish\engines\sing-box.exe
+          if ($LASTEXITCODE -ne 0) { throw "GreyVPN smoke tests failed: $LASTEXITCODE" }
+
+      - name: Run ThroneCore IPC and WG/AWG config smoke tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet run --project .\GreyVPN\tests\GreyVPN.ThroneSmoke\GreyVPN.ThroneSmoke.csproj -c Release --no-restore -- `
+            .\GreyVPN\publish\engines\throne\ThroneCore.exe
+          if ($LASTEXITCODE -ne 0) { throw "ThroneCore smoke tests failed: $LASTEXITCODE" }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GreyVPN-v0.8-win-x64
+          path: GreyVPN\publish\**
+          if-no-files-found: error
