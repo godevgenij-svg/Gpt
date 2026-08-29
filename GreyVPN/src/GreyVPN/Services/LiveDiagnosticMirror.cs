@@ -11,7 +11,7 @@ namespace GreyVPN.Services;
 internal static class LiveDiagnosticMirror
 {
     private static readonly object Sync = new();
-    private static Timer? _timer;
+    private static System.Threading.Timer? _timer;
     private static string _source = string.Empty;
     private static string _sessionTarget = string.Empty;
     private static string _latestTarget = string.Empty;
@@ -38,7 +38,7 @@ internal static class LiveDiagnosticMirror
                 new UTF8Encoding(false));
             File.Copy(_sessionTarget, _latestTarget, overwrite: true);
 
-            _timer = new Timer(_ => CopyNewBytes(), null, TimeSpan.Zero, TimeSpan.FromMilliseconds(750));
+            _timer = new System.Threading.Timer(_ => CopyNewBytes(), null, TimeSpan.Zero, TimeSpan.FromMilliseconds(750));
             AppDomain.CurrentDomain.ProcessExit += (_, _) =>
             {
                 try { CopyNewBytes(); } catch { }
