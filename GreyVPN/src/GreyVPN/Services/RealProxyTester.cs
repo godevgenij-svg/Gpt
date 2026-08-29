@@ -45,6 +45,7 @@ public static class RealProxyTester
         var configPath = Path.Combine(tempDir, "config.json");
         Process? process = null;
         var log = new StringBuilder();
+        var checkLog = string.Empty;
 
         try
         {
@@ -57,7 +58,10 @@ public static class RealProxyTester
             }
 
             await File.WriteAllTextAsync(configPath, config, new UTF8Encoding(false), token);
+            DiagnosticsService.Log("SINGBOX", "Config check start", profile);
             var check = await RunAndCaptureAsync(engine, $"check -c \"{configPath}\"", tempDir, token);
+            checkLog = $"ExitCode={check.ExitCode}\r\nSTDOUT:\r\n{check.Output}\r\nSTDERR:\r\n{check.Error}";
+            DiagnosticsService.Log("SINGBOX", $"Config check end. ExitCode={check.ExitCode}; Error={TrimError(check.Error, check.Output)}", profile);
             if (check.ExitCode != 0)
             {
                 profile.RealStatus = "CONFIG ERROR";
@@ -79,6 +83,7 @@ public static class RealProxyTester
             process.OutputDataReceived += (_, e) => AppendLog(log, e.Data);
             process.ErrorDataReceived += (_, e) => AppendLog(log, e.Data);
             if (!process.Start()) throw new InvalidOperationException("Не удалось запустить sing-box.");
+            DiagnosticsService.Log("SINGBOX", $"Runtime started. PID={process.Id}", profile);
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
 
@@ -89,6 +94,7 @@ public static class RealProxyTester
                 return;
             }
 
+            DiagnosticsService.Log("SINGBOX", $"Local proxy ready on 127.0.0.1:{localPort}; starting HTTPS egress probe", profile);
             var sw = Stopwatch.StartNew();
             var exitIp = await ProxyEgressProbe.GetExitIpAsync(new WebProxy($"http://127.0.0.1:{localPort}"), token);
             sw.Stop();
@@ -127,6 +133,11 @@ public static class RealProxyTester
                 try { process.Kill(entireProcessTree: true); } catch { }
                 try { await process.WaitForExitAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
             }
+
+            var exitCode = process is { HasExited: true } ? process.ExitCode.ToString() : "n/a";
+            DiagnosticsService.WriteEngineLog(profile, "sing-box",
+                $"[CONFIG CHECK]\r\n{checkLog}\r\n\r\n[RUNTIME]\r\n{Snapshot(log)}\r\n\r\n[FINAL]\r\nStatus={profile.RealStatus}\r\nError={profile.RealError}\r\nExitIP={profile.ExitIp}\r\nRealMs={profile.RealTestMs}\r\nProcessExitCode={exitCode}\r\n");
+
             process?.Dispose();
             try { Directory.Delete(tempDir, recursive: true); } catch { }
         }
@@ -175,9 +186,21 @@ public static class RealProxyTester
             RedirectStandardError = true
         };
         using var process = Process.Start(psi) ?? throw new InvalidOperationException("Не удалось запустить sing-box check.");
-        var outputTask = process.StandardOutput.ReadToEndAsync(ct);
-        var errorTask = process.StandardError.ReadToEndAsync(ct);
-        await process.WaitForExitAsync(ct);
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
+        try
+        {
+            await process.WaitForExitAsync(ct);
+        }
+        catch (OperationCanceledException)
+        {
+            if (!process.HasExited)
+            {
+                try { process.Kill(entireProcessTree: true); } catch { }
+                try { await process.WaitForExitAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
+            }
+            throw;
+        }
         return (process.ExitCode, await outputTask, await errorTask);
     }
 
@@ -198,7 +221,7 @@ public static class RealProxyTester
         if (string.IsNullOrWhiteSpace(line)) return;
         lock (log)
         {
-            if (log.Length < 48_000) log.AppendLine(line);
+            if (log.Length < 96_000) log.AppendLine(line);
         }
     }
 
