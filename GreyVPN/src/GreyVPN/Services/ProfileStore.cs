@@ -19,6 +19,9 @@ public static class ProfileStore
     public static async Task SaveAsync(IEnumerable<VpnProfile> profiles)
     {
         var snapshot = profiles.ToList();
+        foreach (var profile in snapshot)
+            await TryEnsureVaultAsync(profile).ConfigureAwait(false);
+
         await SaveGate.WaitAsync().ConfigureAwait(false);
         try
         {
@@ -81,11 +84,28 @@ public static class ProfileStore
         {
             await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, useAsync: true);
             var profiles = await JsonSerializer.DeserializeAsync<List<VpnProfile>>(stream, JsonOptions).ConfigureAwait(false);
+            if (profiles is null) return null;
+
+            foreach (var profile in profiles)
+                await TryEnsureVaultAsync(profile).ConfigureAwait(false);
             return profiles;
         }
         catch
         {
             return null;
+        }
+    }
+
+    private static async Task TryEnsureVaultAsync(VpnProfile profile)
+    {
+        if (!ConfigVault.Supports(profile)) return;
+        try
+        {
+            await ConfigVault.EnsureStoredAsync(profile).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            DiagnosticsService.Log("STORE", $"WG/AWG vault migration skipped: {ex.GetType().Name}: {ex.Message}", profile);
         }
     }
 }
