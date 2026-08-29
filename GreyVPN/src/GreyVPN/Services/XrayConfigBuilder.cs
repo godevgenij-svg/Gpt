@@ -18,6 +18,8 @@ public static class XrayConfigBuilder
     {
         if (!Supports(profile))
             throw new InvalidDataException($"Xray real-test не поддерживает {profile.Type}.");
+        if (localPort is < 1 or > 65535)
+            throw new ArgumentOutOfRangeException(nameof(localPort));
 
         var outbound = profile.Type.ToUpperInvariant() switch
         {
@@ -76,6 +78,9 @@ public static class XrayConfigBuilder
     {
         var uri = ParseUri(raw, "trojan");
         var q = ParseQuery(uri.Query);
+        if (string.IsNullOrWhiteSpace(Get(q, "security")))
+            q["security"] = "tls"; // TLS is implicit for ordinary trojan:// links.
+
         var password = Uri.UnescapeDataString(uri.UserInfo);
         if (string.IsNullOrWhiteSpace(password)) throw new InvalidDataException("Trojan: отсутствует пароль.");
 
@@ -190,10 +195,7 @@ public static class XrayConfigBuilder
         }
 
         var security = Get(q, "security").ToLowerInvariant();
-        if (security == "tls" || security == "reality")
-            stream["security"] = security;
-        else
-            stream["security"] = "none";
+        stream["security"] = security is "tls" or "reality" ? security : "none";
 
         if (security == "tls")
         {
@@ -235,7 +237,7 @@ public static class XrayConfigBuilder
             "" or "tcp" or "raw" => "raw",
             "ws" or "websocket" => "websocket",
             "grpc" => "grpc",
-            "httpupgrade" => "httpupgrade",
+            "httpupgrade" or "http-upgrade" => "httpupgrade",
             "xhttp" or "splithttp" => "xhttp",
             "http" or "h2" or "quic" => throw new InvalidDataException($"Xray {value}: этот старый transport удалён из актуального ядра; нужен эквивалентный XHTTP-профиль."),
             _ => throw new InvalidDataException($"Xray transport '{value}' пока не поддержан импортёром.")
