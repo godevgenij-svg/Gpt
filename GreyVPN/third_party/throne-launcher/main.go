@@ -5,21 +5,38 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
-// GreyVPN launches this executable as engines/throne/Throne.exe.
-// ThroneCore's upstream Windows parent check intentionally accepts only a
-// parent named Throne.exe in the same directory. This launcher keeps the
-// upstream ThroneCore binary unmodified and forwards its inherited IPC
-// environment and standard streams.
+// The same tiny program is built twice:
+//   ThroneCore.exe -> starts Throne.exe (compatibility entry point used by GreyVPN)
+//   Throne.exe     -> starts ThroneCoreUpstream.exe
+//
+// The upstream ThroneCore binary itself stays unmodified. Its Windows parent
+// check sees a parent named Throne.exe in the same directory, exactly as
+// upstream expects. IPC environment and standard streams are inherited through
+// both launchers.
 func main() {
 	self, err := os.Executable()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "launcher: resolve executable:", err)
 		os.Exit(111)
 	}
-	core := filepath.Join(filepath.Dir(self), "ThroneCore.exe")
-	cmd := exec.Command(core)
+
+	dir := filepath.Dir(self)
+	name := strings.ToLower(filepath.Base(self))
+	var target string
+	switch name {
+	case "thronecore.exe":
+		target = filepath.Join(dir, "Throne.exe")
+	case "throne.exe":
+		target = filepath.Join(dir, "ThroneCoreUpstream.exe")
+	default:
+		fmt.Fprintln(os.Stderr, "launcher: unexpected executable name:", filepath.Base(self))
+		os.Exit(110)
+	}
+
+	cmd := exec.Command(target)
 	cmd.Env = os.Environ()
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -29,7 +46,7 @@ func main() {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			os.Exit(exitErr.ExitCode())
 		}
-		fmt.Fprintln(os.Stderr, "launcher: start ThroneCore:", err)
+		fmt.Fprintln(os.Stderr, "launcher: start child:", err)
 		os.Exit(112)
 	}
 }
