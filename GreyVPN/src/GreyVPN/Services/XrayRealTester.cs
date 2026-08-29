@@ -8,8 +8,8 @@ namespace GreyVPN.Services;
 
 public static class XrayRealTester
 {
-    private static readonly TimeSpan OverallTimeout = TimeSpan.FromSeconds(28);
-    private static readonly TimeSpan LocalStartTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan OverallTimeout = TimeSpan.FromSeconds(32);
+    private static readonly TimeSpan LocalStartTimeout = TimeSpan.FromSeconds(6);
 
     public static bool Supports(VpnProfile profile) => XrayConfigBuilder.Supports(profile);
     public static bool IsRealWorking(VpnProfile profile) => profile.RealStatus == "РАБОТАЕТ";
@@ -83,23 +83,8 @@ public static class XrayRealTester
             }
 
             var sw = Stopwatch.StartNew();
-            using var handler = new HttpClientHandler
-            {
-                Proxy = new WebProxy($"http://127.0.0.1:{localPort}"),
-                UseProxy = true,
-                AllowAutoRedirect = false
-            };
-            using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(12) };
-
-            using var probe = await client.GetAsync("https://www.gstatic.com/generate_204", HttpCompletionOption.ResponseHeadersRead, token);
-            if ((int)probe.StatusCode < 200 || (int)probe.StatusCode >= 400)
-                throw new HttpRequestException($"HTTPS probe вернул HTTP {(int)probe.StatusCode}.");
-
-            var exitIp = (await client.GetStringAsync("https://api.ipify.org", token)).Trim();
+            var exitIp = await ProxyEgressProbe.GetExitIpAsync(new WebProxy($"http://127.0.0.1:{localPort}"), token);
             sw.Stop();
-
-            if (!IPAddress.TryParse(exitIp, out _))
-                throw new InvalidDataException($"ipify вернул неверный IP: {exitIp}");
 
             profile.RealStatus = "РАБОТАЕТ";
             profile.ExitIp = exitIp;
@@ -114,7 +99,7 @@ public static class XrayRealTester
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
             profile.RealStatus = "TIMEOUT";
-            profile.RealError = "Xray real-test превысил 28 с. " + Shorten(LastUsefulLines(Snapshot(log), string.Empty));
+            profile.RealError = $"Xray real-test превысил {OverallTimeout.TotalSeconds:0} с. " + Shorten(LastUsefulLines(Snapshot(log), string.Empty));
         }
         catch (OperationCanceledException)
         {
@@ -198,10 +183,10 @@ public static class XrayRealTester
 
     private static string ClassifyRuntimeFailure(string log)
     {
-        if (ContainsAny(log, "invalid user", "authentication failed", "rejected proxy", "invalid account")) return "AUTH ERROR";
-        if (ContainsAny(log, "reality", "tls handshake", "certificate", "server name")) return "TLS ERROR";
-        if (ContainsAny(log, "timeout", "deadline exceeded", "i/o timeout")) return "TIMEOUT";
-        if (ContainsAny(log, "connection refused", "connection reset", "connection closed")) return "CONNECT ERROR";
+        if (ContainsAny(log, "invalid user", "authentication failed", "rejected proxy", "invalid account", "invalid password")) return "AUTH ERROR";
+        if (ContainsAny(log, "reality", "tls handshake", "certificate", "server name", "x509")) return "TLS ERROR";
+        if (ContainsAny(log, "timeout", "deadline exceeded", "i/o timeout", "context deadline")) return "TIMEOUT";
+        if (ContainsAny(log, "connection refused", "connection reset", "connection closed", "no route to host", "network is unreachable")) return "CONNECT ERROR";
         return "NO INTERNET";
     }
 
@@ -213,7 +198,7 @@ public static class XrayRealTester
         if (string.IsNullOrWhiteSpace(line)) return;
         lock (log)
         {
-            if (log.Length < 32_000) log.AppendLine(line);
+            if (log.Length < 48_000) log.AppendLine(line);
         }
     }
 
@@ -226,7 +211,7 @@ public static class XrayRealTester
     {
         var lines = value.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
             .Where(x => !string.IsNullOrWhiteSpace(x))
-            .TakeLast(8);
+            .TakeLast(10);
         var text = string.Join(" | ", lines);
         return string.IsNullOrWhiteSpace(text) ? fallback : text;
     }
@@ -244,6 +229,6 @@ public static class XrayRealTester
     private static string Shorten(string value)
     {
         value = value.Replace('\r', ' ').Replace('\n', ' ').Trim();
-        return value.Length <= 1100 ? value : value[..1100];
+        return value.Length <= 1400 ? value : value[..1400];
     }
 }
