@@ -34,7 +34,10 @@ public partial class MainWindow
         _testCts = new CancellationTokenSource();
         var ct = _testCts.Token;
         var completed = 0;
+        var outcome = "completed";
         using var gate = new SemaphoreSlim(RealTestConcurrency);
+
+        DiagnosticsService.Log("REAL", $"Real-test started. Profiles={profiles.Count}; Concurrency={RealTestConcurrency}");
 
         try
         {
@@ -56,16 +59,37 @@ public partial class MainWindow
             }).ToArray();
 
             await Task.WhenAll(tasks);
+            DiagnosticsService.Log("REAL", $"Real-test completed. Profiles={profiles.Count}; Working={profiles.Count(RealConnectionTester.IsRealWorking)}");
             RefreshStatus($"Real-test завершён: {profiles.Count}. Работают: {profiles.Count(RealConnectionTester.IsRealWorking)}");
         }
         catch (OperationCanceledException)
         {
+            outcome = "cancelled";
+            DiagnosticsService.Log("REAL", $"Real-test cancelled. Completed={completed}/{profiles.Count}");
             RefreshStatus($"Real-test остановлен: {completed}/{profiles.Count}");
+        }
+        catch (Exception ex)
+        {
+            outcome = "failed";
+            DiagnosticsService.Log("REAL", $"Real-test unhandled failure: {ex.GetType().Name}: {ex.Message}");
+            RefreshStatus($"Real-test аварийно остановлен: {completed}/{profiles.Count}");
         }
         finally
         {
             _profilesView?.Refresh();
-            await ProfileStore.SaveAsync(Profiles);
+            try { await ProfileStore.SaveAsync(Profiles); }
+            catch (Exception ex) { DiagnosticsService.Log("STORE", $"Save after real-test failed: {ex.GetType().Name}: {ex.Message}"); }
+
+            try
+            {
+                var reportPath = await DiagnosticsService.CreateChatGptReportAsync(Profiles, $"real-test-{outcome}");
+                RefreshStatus($"Real-test {completed}/{profiles.Count}. Работают: {profiles.Count(RealConnectionTester.IsRealWorking)}. Отчёт: {reportPath}");
+            }
+            catch (Exception ex)
+            {
+                DiagnosticsService.Log("REPORT", $"Automatic report failed: {ex.GetType().Name}: {ex.Message}");
+                RefreshStatus($"Real-test {completed}/{profiles.Count}. Отчёт создать не удалось.");
+            }
         }
     }
 }
