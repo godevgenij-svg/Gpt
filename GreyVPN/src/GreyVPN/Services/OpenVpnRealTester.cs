@@ -50,11 +50,17 @@ public static class OpenVpnRealTester
         {
             profile.RealStatus = sanitizeError.Contains("логин/пароль", StringComparison.OrdinalIgnoreCase) ? "AUTH NEEDED" : "CONFIG BLOCKED";
             profile.RealError = sanitizeError;
+            DiagnosticsService.Log("OPENVPN", $"Safe-config build blocked: {sanitizeError}", profile);
             return;
         }
 
         string baselineIp;
-        try { baselineIp = await GetCloudflareIpAsync(ct); }
+        try
+        {
+            DiagnosticsService.Log("OPENVPN", "Baseline external-IP probe start", profile);
+            baselineIp = await GetCloudflareIpAsync(ct);
+            DiagnosticsService.Log("OPENVPN", $"Baseline external-IP probe complete. IP={baselineIp}", profile);
+        }
         catch (Exception ex)
         {
             profile.RealStatus = "BASELINE ERROR";
@@ -91,6 +97,7 @@ public static class OpenVpnRealTester
             process.ErrorDataReceived += (_, e) => HandleLine(e.Data, log, connected);
 
             if (!process.Start()) throw new InvalidOperationException("Не удалось запустить openvpn.exe.");
+            DiagnosticsService.Log("OPENVPN", $"Runtime started. PID={process.Id}", profile);
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
 
@@ -105,6 +112,7 @@ public static class OpenVpnRealTester
                 return;
             }
 
+            DiagnosticsService.Log("OPENVPN", "Initialization Sequence Completed; starting routed HTTPS probe", profile);
             var sw = Stopwatch.StartNew();
             var exitIp = await GetCloudflareIpAsync(token);
             sw.Stop();
@@ -152,6 +160,11 @@ public static class OpenVpnRealTester
                 try { process.Kill(entireProcessTree: true); } catch { }
                 try { await process.WaitForExitAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3)); } catch { }
             }
+
+            var exitCode = process is { HasExited: true } ? process.ExitCode.ToString() : "n/a";
+            DiagnosticsService.WriteEngineLog(profile, "openvpn",
+                $"[RUNTIME]\r\n{Snapshot(log)}\r\n\r\n[FINAL]\r\nStatus={profile.RealStatus}\r\nError={profile.RealError}\r\nExitIP={profile.ExitIp}\r\nRealMs={profile.RealTestMs}\r\nProcessExitCode={exitCode}\r\n");
+
             process?.Dispose();
             try { Directory.Delete(tempDir, recursive: true); } catch { }
         }
@@ -160,7 +173,7 @@ public static class OpenVpnRealTester
     private static void HandleLine(string? line, StringBuilder log, TaskCompletionSource connected)
     {
         if (string.IsNullOrWhiteSpace(line)) return;
-        lock (log) { if (log.Length < 48_000) log.AppendLine(line); }
+        lock (log) { if (log.Length < 96_000) log.AppendLine(line); }
         if (line.Contains("Initialization Sequence Completed", StringComparison.OrdinalIgnoreCase)) connected.TrySetResult();
     }
 
@@ -196,7 +209,6 @@ public static class OpenVpnRealTester
             profile.RealStatus = "CONFIG ERROR";
             profile.RealError = Shorten(LastUsefulLines(log)) + suffix;
         }
-        // TLS must be checked before driver errors. Normal startup mentions Wintun too.
         else if (ContainsAny(log, "TLS Error", "TLS key negotiation failed", "TLS handshake failed", "VERIFY ERROR"))
         {
             profile.RealStatus = "TLS ERROR";
