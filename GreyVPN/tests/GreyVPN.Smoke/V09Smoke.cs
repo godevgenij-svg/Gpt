@@ -13,7 +13,7 @@ internal static class V09Smoke
         TestXrayRemovedAllowInsecure();
         TestVmessOpaqueBase64();
         TestDoubleEncodedXhttpExtra();
-        Console.WriteLine("OK GreyVPN v0.9.1.2 regression smoke");
+        Console.WriteLine("OK GreyVPN v0.9.1.3 regression smoke");
     }
 
     private static void TestConfigVault()
@@ -73,7 +73,7 @@ internal static class V09Smoke
     {
         const string source = "[Interface]\nPrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\nAddress = 10.0.0.2/32\nDNS = 8.8.8.8\nJc = 5\nJmin = 40\nJmax = 70\nS1 = 12\nS2 = 12\nH1 = 123\n[Peer]\nPublicKey = BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = 192.0.2.1:51820\n";
         var test = AmneziaWgTestConfigBuilder.Build(source);
-        Must(!test.Contains("DNS =", StringComparison.OrdinalIgnoreCase), "AWG test does not replace system DNS");
+        Must(test.Contains("DNS = 8.8.8.8", StringComparison.OrdinalIgnoreCase), "AWG test preserves profile DNS");
         Must(test.Contains("AllowedIPs = 0.0.0.0/0, ::/0", StringComparison.Ordinal), "AWG test preserves original routing semantics");
         Must(test.Contains("Jc = 5", StringComparison.Ordinal) && test.Contains("H1 = 123", StringComparison.Ordinal), "AWG obfuscation parameters are preserved");
     }
@@ -98,7 +98,7 @@ internal static class V09Smoke
     {
         const string payload = "eyJ2IjoiMiIsInBzIjoidGVzdNC+IiwiYWRkIjoiZXhhbXBsZS5jb20iLCJwb3J0IjoiNDQzIiwiaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJhaWQiOiIwIiwibmV0Ijoid3MiLCJ0eXBlIjoibm9uZSIsImhvc3QiOiJleGFtcGxlLmNvbSIsInBhdGgiOiIvIiwidGxzIjoidGxzIiwic2N5IjoiYXV0byJ9";
         Must(payload.Contains('+'), "VMess regression payload actually contains plus");
-        var temp = Path.Combine(Path.GetTempPath(), "GreyVPN-v0912-vmess-" + Guid.NewGuid().ToString("N") + ".txt");
+        var temp = Path.Combine(Path.GetTempPath(), "GreyVPN-v0913-vmess-" + Guid.NewGuid().ToString("N") + ".txt");
         try
         {
             File.WriteAllText(temp, "vmess://" + payload);
@@ -134,6 +134,6 @@ internal static class V09Smoke
 
     private static void Must(bool condition, string message)
     {
-        if (!condition) throw new InvalidOperationException("V0.9.1.2 SMOKE FAILED: " + message);
+        if (!condition) throw new InvalidOperationException("V0.9.1.3 SMOKE FAILED: " + message);
     }
 }
