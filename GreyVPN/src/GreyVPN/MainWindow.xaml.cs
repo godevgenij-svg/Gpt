@@ -10,7 +10,7 @@ using GreyVPN.Services;
 
 namespace GreyVPN;
 
-public partial class MainWindow : Window, INotifyPropertyChanged
+public partial class MainWindow : Window
 {
     private const int TestConcurrency = 8;
     private const int RealTestConcurrency = 2;
@@ -18,7 +18,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private ICollectionView? _profilesView;
 
     public ObservableCollection<VpnProfile> Profiles { get; } = new();
-    public event PropertyChangedEventHandler? PropertyChanged;
 
     public MainWindow()
     {
@@ -40,10 +39,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         RefreshStatus($"Готово. Профилей: {Profiles.Count}");
     }
 
-    private async void MainWindow_Closing(object? sender, CancelEventArgs e)
+    private void MainWindow_Closing(object? sender, CancelEventArgs e)
     {
         _testCts?.Cancel();
-        await ProfileStore.SaveAsync(Profiles);
+        try { ProfileStore.SaveAsync(Profiles).GetAwaiter().GetResult(); } catch { }
     }
 
     private async void ImportFiles_Click(object sender, RoutedEventArgs e)
@@ -121,60 +120,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 {
                     gate.Release();
                     var done = Interlocked.Increment(ref completed);
-                    await Dispatcher.InvokeAsync(() => RefreshStatus($"Предтест {done}/{profiles.Count}. Отклик: {profiles.Count(ProfileTester.IsResponsive)}"));
+                    await Dispatcher.InvokeAsync(() => RefreshStatus($"Предтест {done}/{profiles.Count}. Отклик: {profiles.Count(ProfileTester.IsRealTestCandidate)}"));
                 }
             }).ToArray();
             await Task.WhenAll(tasks);
-            RefreshStatus($"Предтест завершён: {profiles.Count}. Откликнулись: {profiles.Count(ProfileTester.IsResponsive)}");
+            RefreshStatus($"Предтест завершён: {profiles.Count}. Допущены к real-test: {profiles.Count(ProfileTester.IsRealTestCandidate)}");
         }
         catch (OperationCanceledException) { RefreshStatus($"Предтест остановлен: {completed}/{profiles.Count}"); }
-        finally
-        {
-            _profilesView?.Refresh();
-            await ProfileStore.SaveAsync(Profiles);
-        }
-    }
-
-    private async void RealTestSelected_Click(object sender, RoutedEventArgs e) =>
-        await RealTestProfilesAsync(ProfilesGrid.SelectedItems.Cast<VpnProfile>().ToList());
-
-    private async void RealTestResponsive_Click(object sender, RoutedEventArgs e)
-    {
-        var candidates = Profiles.Where(p => ProfileTester.IsResponsive(p) && SingBoxConfigBuilder.Supports(p)).ToList();
-        await RealTestProfilesAsync(candidates);
-    }
-
-    private async Task RealTestProfilesAsync(IReadOnlyList<VpnProfile> profiles)
-    {
-        if (profiles.Count == 0)
-        {
-            RefreshStatus("Нет подходящих VLESS/VMESS/TROJAN/HYSTERIA2 профилей для реального теста.");
-            return;
-        }
-
-        _testCts?.Cancel();
-        _testCts = new CancellationTokenSource();
-        var ct = _testCts.Token;
-        var completed = 0;
-        using var gate = new SemaphoreSlim(RealTestConcurrency);
-        try
-        {
-            RefreshStatus($"Реальный тест 0/{profiles.Count}. Параллельно: {RealTestConcurrency}");
-            var tasks = profiles.Select(async profile =>
-            {
-                await gate.WaitAsync(ct);
-                try { await RealProxyTester.TestAsync(profile, ct); }
-                finally
-                {
-                    gate.Release();
-                    var done = Interlocked.Increment(ref completed);
-                    await Dispatcher.InvokeAsync(() => RefreshStatus($"Реальный тест {done}/{profiles.Count}. Работают: {profiles.Count(RealProxyTester.IsRealWorking)}"));
-                }
-            }).ToArray();
-            await Task.WhenAll(tasks);
-            RefreshStatus($"Реальный тест завершён: {profiles.Count}. Работают: {profiles.Count(RealProxyTester.IsRealWorking)}");
-        }
-        catch (OperationCanceledException) { RefreshStatus($"Реальный тест остановлен: {completed}/{profiles.Count}"); }
         finally
         {
             _profilesView?.Refresh();
@@ -196,17 +148,17 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void ShowResponsive_Click(object sender, RoutedEventArgs e)
     {
         _profilesView ??= CollectionViewSource.GetDefaultView(Profiles);
-        _profilesView.Filter = item => item is VpnProfile p && ProfileTester.IsResponsive(p);
+        _profilesView.Filter = item => item is VpnProfile p && ProfileTester.IsRealTestCandidate(p);
         _profilesView.Refresh();
-        RefreshStatus($"Показаны откликнувшиеся: {Profiles.Count(ProfileTester.IsResponsive)}");
+        RefreshStatus($"Показаны допущенные к real-test: {Profiles.Count(ProfileTester.IsRealTestCandidate)}");
     }
 
     private void ShowRealWorking_Click(object sender, RoutedEventArgs e)
     {
         _profilesView ??= CollectionViewSource.GetDefaultView(Profiles);
-        _profilesView.Filter = item => item is VpnProfile p && RealProxyTester.IsRealWorking(p);
+        _profilesView.Filter = item => item is VpnProfile p && RealConnectionTester.IsRealWorking(p);
         _profilesView.Refresh();
-        RefreshStatus($"Показаны реально рабочие: {Profiles.Count(RealProxyTester.IsRealWorking)}");
+        RefreshStatus($"Показаны реально рабочие: {Profiles.Count(RealConnectionTester.IsRealWorking)}");
     }
 
     private void ShowAll_Click(object sender, RoutedEventArgs e)
@@ -219,16 +171,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void ExportResponsive_Click(object sender, RoutedEventArgs e)
     {
-        var responsive = Profiles.Where(ProfileTester.IsResponsive).ToList();
+        var responsive = Profiles.Where(ProfileTester.IsRealTestCandidate).ToList();
         if (responsive.Count == 0)
         {
-            System.Windows.MessageBox.Show(this, "Нет профилей с откликом предварительного теста.", "Экспорт", MessageBoxButton.OK, MessageBoxImage.Information);
+            System.Windows.MessageBox.Show(this, "Нет профилей, допущенных к real-test.", "Экспорт", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
         var dialog = new Microsoft.Win32.SaveFileDialog
         {
             Filter = "ZIP archive|*.zip",
-            FileName = $"GreyVPN_responsive_{DateTime.Now:yyyyMMdd_HHmmss}.zip",
+            FileName = $"GreyVPN_candidates_{DateTime.Now:yyyyMMdd_HHmmss}.zip",
             AddExtension = true,
             DefaultExt = ".zip"
         };
@@ -236,7 +188,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         try
         {
             ExportResponsiveZip(dialog.FileName, responsive);
-            RefreshStatus($"Экспортировано: {responsive.Count}; реально рабочие среди них: {responsive.Count(RealProxyTester.IsRealWorking)}");
+            RefreshStatus($"Экспортировано: {responsive.Count}; реально рабочие среди них: {responsive.Count(RealConnectionTester.IsRealWorking)}");
         }
         catch (Exception ex) { System.Windows.MessageBox.Show(this, ex.Message, "Ошибка экспорта", MessageBoxButton.OK, MessageBoxImage.Error); }
     }
@@ -250,10 +202,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         using var archive = ZipFile.Open(zipPath, ZipArchiveMode.Create);
         foreach (var p in profiles)
         {
-            manifest.Append(p.Name).Append('\t').Append(p.Type).Append('\t').Append(p.Endpoint).Append('\t').Append(p.Transport).Append('\t')
-                .Append(p.Status).Append('\t').Append(p.TcpConnectMs).Append('\t').Append(p.PingMs).Append('\t')
-                .Append(p.RealStatus).Append('\t').Append(p.ExitIp).Append('\t').Append(p.RealTestMs).Append('\t')
-                .Append(p.RealError.Replace('\t', ' ')).Append("\r\n");
+            manifest.Append(CleanTsv(p.Name)).Append('\t').Append(CleanTsv(p.Type)).Append('\t').Append(CleanTsv(p.Endpoint)).Append('\t').Append(CleanTsv(p.Transport)).Append('\t')
+                .Append(CleanTsv(p.Status)).Append('\t').Append(p.TcpConnectMs).Append('\t').Append(p.PingMs).Append('\t')
+                .Append(CleanTsv(p.RealStatus)).Append('\t').Append(CleanTsv(p.ExitIp)).Append('\t').Append(p.RealTestMs).Append('\t')
+                .Append(CleanTsv(p.RealError)).Append("\r\n");
             if (!string.IsNullOrWhiteSpace(p.RawValue) && p.RawValue.Contains("://", StringComparison.Ordinal))
             {
                 proxyLinks.AppendLine(p.RawValue.Trim());
@@ -266,9 +218,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 archive.CreateEntryFromFile(p.SourcePath, MakeUniqueEntry($"{folder}/{file}", usedEntries), CompressionLevel.Optimal);
             }
         }
-        WriteTextEntry(archive, "responsive_manifest.tsv", manifest.ToString());
+        WriteTextEntry(archive, "candidates_manifest.tsv", manifest.ToString());
         if (proxyLinks.Length > 0) WriteTextEntry(archive, "proxy_links.txt", proxyLinks.ToString());
     }
+
+    private static string CleanTsv(string value) => value.Replace('\t', ' ').Replace('\r', ' ').Replace('\n', ' ');
 
     private static void WriteTextEntry(ZipArchive archive, string name, string content)
     {
