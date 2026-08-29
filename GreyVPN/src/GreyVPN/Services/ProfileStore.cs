@@ -19,7 +19,7 @@ public static class ProfileStore
     public static async Task SaveAsync(IEnumerable<VpnProfile> profiles)
     {
         var snapshot = profiles.ToList();
-        await SaveGate.WaitAsync();
+        await SaveGate.WaitAsync().ConfigureAwait(false);
         try
         {
             Directory.CreateDirectory(DataDir);
@@ -28,8 +28,8 @@ public static class ProfileStore
             {
                 await using (var stream = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536, useAsync: true))
                 {
-                    await JsonSerializer.SerializeAsync(stream, snapshot, JsonOptions);
-                    await stream.FlushAsync();
+                    await JsonSerializer.SerializeAsync(stream, snapshot, JsonOptions).ConfigureAwait(false);
+                    await stream.FlushAsync().ConfigureAwait(false);
                 }
 
                 if (File.Exists(ProfilesPath))
@@ -66,11 +66,11 @@ public static class ProfileStore
     public static async Task<IReadOnlyList<VpnProfile>> LoadAsync()
     {
         Directory.CreateDirectory(DataDir);
-        var primary = await TryLoadAsync(ProfilesPath);
+        var primary = await TryLoadAsync(ProfilesPath).ConfigureAwait(false);
         if (primary is not null)
             return primary;
 
-        var backup = await TryLoadAsync(BackupPath);
+        var backup = await TryLoadAsync(BackupPath).ConfigureAwait(false);
         return backup ?? Array.Empty<VpnProfile>();
     }
 
@@ -80,7 +80,7 @@ public static class ProfileStore
         try
         {
             await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, useAsync: true);
-            var profiles = await JsonSerializer.DeserializeAsync<List<VpnProfile>>(stream, JsonOptions);
+            var profiles = await JsonSerializer.DeserializeAsync<List<VpnProfile>>(stream, JsonOptions).ConfigureAwait(false);
             return profiles;
         }
         catch
