@@ -8,24 +8,25 @@ internal static class V09Smoke
     internal static void Run()
     {
         TestConfigVault();
+        TestOpenVpnVault();
         TestAmneziaWgTestConfig();
         TestXrayRemovedAllowInsecure();
-        Console.WriteLine("OK GreyVPN v0.9 regression smoke");
+        Console.WriteLine("OK GreyVPN v0.9.1 regression smoke");
     }
 
     private static void TestConfigVault()
     {
-        var temp = Path.Combine(Path.GetTempPath(), "GreyVPN-v09-vault-" + Guid.NewGuid().ToString("N") + ".conf");
+        var temp = Path.Combine(Path.GetTempPath(), "GreyVPN-v091-vault-" + Guid.NewGuid().ToString("N") + ".conf");
         const string config = "[Interface]\nPrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\nAddress = 10.0.0.2/32\n[Peer]\nPublicKey = BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=\nAllowedIPs = 0.0.0.0/0\nEndpoint = 192.0.2.1:51820\n";
         File.WriteAllText(temp, config);
         var profile = new VpnProfile { Name = "vault", Type = "WireGuard", SourcePath = temp };
         try
         {
             Must(ConfigVault.EnsureStoredAsync(profile).GetAwaiter().GetResult(), "WG config is copied to internal vault");
-            Must(!string.IsNullOrWhiteSpace(profile.StoredConfigFile), "vault file reference is persisted in model");
+            Must(!string.IsNullOrWhiteSpace(profile.StoredConfigFile), "WG vault file reference is persisted in model");
             File.Delete(temp);
             var restored = ConfigVault.ReadTextAsync(profile).GetAwaiter().GetResult();
-            Must(restored.Contains("Endpoint = 192.0.2.1:51820", StringComparison.Ordinal), "vault remains usable after original file deletion");
+            Must(restored.Contains("Endpoint = 192.0.2.1:51820", StringComparison.Ordinal), "WG vault remains usable after original file deletion");
         }
         finally
         {
@@ -39,14 +40,40 @@ internal static class V09Smoke
         }
     }
 
+    private static void TestOpenVpnVault()
+    {
+        var temp = Path.Combine(Path.GetTempPath(), "GreyVPN-v091-openvpn-" + Guid.NewGuid().ToString("N") + ".ovpn");
+        const string config = "client\ndev tun\nproto udp\nremote 192.0.2.1 1194\n<ca>\nDUMMY\n</ca>\n";
+        File.WriteAllText(temp, config);
+        var profile = new VpnProfile { Name = "ovpn-vault", Type = "OpenVPN", SourcePath = temp };
+        try
+        {
+            Must(OpenVpnConfigVault.EnsureStoredAsync(profile).GetAwaiter().GetResult(), "OpenVPN config is copied to internal vault");
+            Must(!string.IsNullOrWhiteSpace(profile.StoredConfigFile), "OpenVPN vault file reference is persisted in model");
+            File.Delete(temp);
+            var restoredPath = OpenVpnConfigVault.ResolveUsablePathAsync(profile).GetAwaiter().GetResult();
+            Must(restoredPath is not null && File.Exists(restoredPath), "OpenVPN vault remains usable after original file deletion");
+            Must(File.ReadAllText(restoredPath).Contains("remote 192.0.2.1 1194", StringComparison.Ordinal), "OpenVPN vaulted text is intact");
+        }
+        finally
+        {
+            try { if (File.Exists(temp)) File.Delete(temp); } catch { }
+            try
+            {
+                var stored = OpenVpnConfigVault.ResolveStoredPath(profile);
+                if (stored is not null && File.Exists(stored)) File.Delete(stored);
+            }
+            catch { }
+        }
+    }
+
     private static void TestAmneziaWgTestConfig()
     {
         const string source = "[Interface]\nPrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\nAddress = 10.0.0.2/32\nDNS = 8.8.8.8\nJc = 5\nJmin = 40\nJmax = 70\nS1 = 12\nS2 = 12\nH1 = 123\n[Peer]\nPublicKey = BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = 192.0.2.1:51820\n";
         var test = AmneziaWgTestConfigBuilder.Build(source);
-        Must(!test.Contains("DNS =", StringComparison.OrdinalIgnoreCase), "AWG test does not change system DNS");
-        Must(test.Contains("AllowedIPs = " + AmneziaWgTestConfigBuilder.ProbeAllowedIps, StringComparison.Ordinal), "AWG test routes only probe IPs");
+        Must(!test.Contains("DNS =", StringComparison.OrdinalIgnoreCase), "AWG test does not replace system DNS");
+        Must(test.Contains("AllowedIPs = 0.0.0.0/0, ::/0", StringComparison.Ordinal), "AWG test preserves original routing semantics");
         Must(test.Contains("Jc = 5", StringComparison.Ordinal) && test.Contains("H1 = 123", StringComparison.Ordinal), "AWG obfuscation parameters are preserved");
-        Must(!test.Contains("0.0.0.0/0", StringComparison.Ordinal), "default route removed from AWG test config");
     }
 
     private static void TestXrayRemovedAllowInsecure()
@@ -67,6 +94,6 @@ internal static class V09Smoke
 
     private static void Must(bool condition, string message)
     {
-        if (!condition) throw new InvalidOperationException("V0.9 SMOKE FAILED: " + message);
+        if (!condition) throw new InvalidOperationException("V0.9.1 SMOKE FAILED: " + message);
     }
 }
