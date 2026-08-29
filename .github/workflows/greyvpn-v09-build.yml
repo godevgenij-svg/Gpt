@@ -1,0 +1,217 @@
+name: GreyVPN v0.9 Official Engines Windows build
+
+on:
+  push:
+    branches:
+      - greyvpn-v0.9-official-engines
+    paths:
+      - 'GreyVPN/**'
+      - '.github/workflows/greyvpn-v09-build.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout GreyVPN
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned official AmneziaWG Windows client
+        uses: actions/checkout@v4
+        with:
+          repository: amnezia-vpn/amneziawg-windows-client
+          ref: 800416d673d83ed90ede02ca2ccd3683fe107d12
+          path: amneziawg-src
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore .NET projects
+        run: |
+          dotnet restore .\GreyVPN\src\GreyVPN\GreyVPN.csproj
+          dotnet restore .\GreyVPN\tests\GreyVPN.Smoke\GreyVPN.Smoke.csproj
+
+      - name: Publish GreyVPN win-x64
+        run: dotnet publish .\GreyVPN\src\GreyVPN\GreyVPN.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o .\GreyVPN\publish
+
+      - name: Bundle sing-box 1.13.19
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = 'https://github.com/SagerNet/sing-box/releases/download/v1.13.19/sing-box-1.13.19-windows-amd64.zip'
+          Invoke-WebRequest -Uri $url -OutFile sing-box.zip
+          Expand-Archive sing-box.zip -DestinationPath sing-box-dist
+          New-Item -ItemType Directory -Force -Path .\GreyVPN\publish\engines | Out-Null
+          $exe = Get-ChildItem sing-box-dist -Recurse -Filter sing-box.exe | Select-Object -First 1
+          if (-not $exe) { throw 'sing-box.exe not found in official archive' }
+          Copy-Item $exe.FullName .\GreyVPN\publish\engines\sing-box.exe
+          .\GreyVPN\publish\engines\sing-box.exe version
+          if ($LASTEXITCODE -ne 0) { throw "sing-box version failed: $LASTEXITCODE" }
+          @"
+          sing-box 1.13.19
+          Source: https://github.com/SagerNet/sing-box
+          License: GPL-3.0-or-later
+          Binary downloaded from the official GitHub release during CI build.
+          "@ | Set-Content -Encoding UTF8 .\GreyVPN\publish\engines\THIRD_PARTY_sing-box.txt
+
+      - name: Bundle verified Xray-core v26.7.28
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = 'https://github.com/XTLS/Xray-core/releases/download/v26.7.28/Xray-windows-64.zip'
+          $expected = 'c7172078fca4711bcd92a4774dcd1822544579c58816197575c47533317fd8d1'
+          Invoke-WebRequest -Uri $url -OutFile xray.zip
+          $actual = (Get-FileHash .\xray.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "Xray SHA256 mismatch. Expected $expected, got $actual" }
+          Expand-Archive .\xray.zip -DestinationPath .\xray-dist
+          $xray = Get-ChildItem .\xray-dist -Recurse -Filter xray.exe | Select-Object -First 1
+          if (-not $xray) { throw 'xray.exe not found in official Xray archive' }
+          $engineDir = '.\GreyVPN\publish\engines\xray'
+          New-Item -ItemType Directory -Force -Path $engineDir | Out-Null
+          Copy-Item (Join-Path $xray.Directory.FullName '*') $engineDir -Recurse -Force
+          & (Join-Path $engineDir 'xray.exe') version
+          if ($LASTEXITCODE -ne 0) { throw "xray.exe version failed: $LASTEXITCODE" }
+          @"
+          Xray-core v26.7.28
+          Source: https://github.com/XTLS/Xray-core/releases/tag/v26.7.28
+          Asset: Xray-windows-64.zip
+          SHA2-256: c7172078fca4711bcd92a4774dcd1822544579c58816197575c47533317fd8d1
+          "@ | Set-Content -Encoding UTF8 (Join-Path $engineDir 'THIRD_PARTY_Xray.txt')
+
+      - name: Bundle OpenVPN 2.6.22 and verified Wintun 0.14.1
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Invoke-WebRequest -Uri 'https://build.openvpn.net/downloads/releases/OpenVPN-2.6.22-I001-amd64.msi' -OutFile openvpn.msi
+          if ((Get-Item .\openvpn.msi).Length -lt 1000000) { throw 'Downloaded OpenVPN MSI is unexpectedly small' }
+          $msi = (Resolve-Path .\openvpn.msi).Path
+          $extract = Join-Path (Get-Location) 'openvpn-dist'
+          New-Item -ItemType Directory -Force -Path $extract | Out-Null
+          $p = Start-Process msiexec.exe -ArgumentList @('/a', $msi, '/qn', "TARGETDIR=$extract") -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "OpenVPN MSI extraction failed: $($p.ExitCode)" }
+          $openvpn = Get-ChildItem $extract -Recurse -Filter openvpn.exe | Select-Object -First 1
+          if (-not $openvpn) { throw 'openvpn.exe not found' }
+          $engineDir = '.\GreyVPN\publish\engines\openvpn'
+          New-Item -ItemType Directory -Force -Path $engineDir | Out-Null
+          Copy-Item (Join-Path $openvpn.Directory.FullName '*') $engineDir -Recurse -Force
+          $wintunExpected = '07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51'
+          Invoke-WebRequest -Uri 'https://www.wintun.net/builds/wintun-0.14.1.zip' -OutFile wintun.zip
+          $actual = (Get-FileHash .\wintun.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $wintunExpected) { throw "Wintun SHA256 mismatch: $actual" }
+          Expand-Archive .\wintun.zip -DestinationPath .\wintun-dist
+          $wintun = Get-ChildItem .\wintun-dist -Recurse -Filter wintun.dll | Where-Object { $_.FullName -match '[\\/]bin[\\/]amd64[\\/]' } | Select-Object -First 1
+          if (-not $wintun) { throw 'AMD64 wintun.dll not found' }
+          Copy-Item $wintun.FullName (Join-Path $engineDir 'wintun.dll') -Force
+          & (Join-Path $engineDir 'openvpn.exe') --version | Select-Object -First 2
+
+      - name: Build pinned official AmneziaWG Windows client
+        shell: cmd
+        working-directory: amneziawg-src
+        run: build.bat
+
+      - name: Bundle official AmneziaWG Windows x64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $src = '.\amneziawg-src\amd64'
+          $dst = '.\GreyVPN\publish\engines\amneziawg'
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          foreach ($name in @('amneziawg.exe','awg.exe','wintun.dll')) {
+            $path = Join-Path $src $name
+            if (-not (Test-Path $path)) { throw "Official AmneziaWG build missing $name" }
+            Copy-Item $path (Join-Path $dst $name) -Force
+          }
+          Copy-Item '.\amneziawg-src\COPYING' (Join-Path $dst 'LICENSE_AmneziaWG_MIT.txt') -Force
+          @"
+          Official AmneziaWG Windows client
+          Source: https://github.com/amnezia-vpn/amneziawg-windows-client
+          Pinned commit: 800416d673d83ed90ede02ca2ccd3683fe107d12
+          Backend modules: github.com/amnezia-vpn/amneziawg-windows/v3 v3.1.20260814 and amneziawg-go/v3 v3.1.20260814
+          License: MIT
+          GreyVPN uses /installtunnelservice and /uninstalltunnelservice with a temporary config that routes only 1.1.1.1/32 and 1.0.0.1/32 during real-test.
+          "@ | Set-Content -Encoding UTF8 (Join-Path $dst 'THIRD_PARTY_AmneziaWG.txt')
+          & (Join-Path $dst 'awg.exe') --version
+          if ($LASTEXITCODE -ne 0) { throw "awg.exe --version failed: $LASTEXITCODE" }
+
+      - name: Verify packaged engines and version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $required = @(
+            '.\GreyVPN\publish\GreyVPN.exe',
+            '.\GreyVPN\publish\engines\sing-box.exe',
+            '.\GreyVPN\publish\engines\xray\xray.exe',
+            '.\GreyVPN\publish\engines\openvpn\openvpn.exe',
+            '.\GreyVPN\publish\engines\openvpn\wintun.dll',
+            '.\GreyVPN\publish\engines\amneziawg\amneziawg.exe',
+            '.\GreyVPN\publish\engines\amneziawg\awg.exe',
+            '.\GreyVPN\publish\engines\amneziawg\wintun.dll',
+            '.\GreyVPN\publish\engines\amneziawg\LICENSE_AmneziaWG_MIT.txt'
+          )
+          foreach ($path in $required) { if (-not (Test-Path $path)) { throw "Missing packaged file: $path" } }
+          if (Test-Path '.\GreyVPN\publish\engines\throne') { throw 'ThroneCore must not be packaged in GreyVPN v0.9' }
+          $fv = (Get-Item .\GreyVPN\publish\GreyVPN.exe).VersionInfo.FileVersion
+          Write-Host "GreyVPN FileVersion: $fv"
+          if (-not $fv.StartsWith('0.9.0')) { throw "Unexpected GreyVPN FileVersion: $fv" }
+
+      - name: Run GreyVPN smoke tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet run --project .\GreyVPN\tests\GreyVPN.Smoke\GreyVPN.Smoke.csproj -c Release --no-restore -- `
+            .\GreyVPN\publish\engines\xray\xray.exe `
+            .\GreyVPN\publish\engines\sing-box.exe
+          if ($LASTEXITCODE -ne 0) { throw "GreyVPN smoke tests failed: $LASTEXITCODE" }
+
+      - name: Run official AmneziaWG Windows service lifecycle smoke
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = (Resolve-Path '.\GreyVPN\publish\engines\amneziawg\amneziawg.exe').Path
+          $dir = Join-Path $env:RUNNER_TEMP 'GreyVPN-AmneziaWG-smoke'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $conf = Join-Path $dir 'GreyVPNSmoke.conf'
+          $key1 = [Convert]::ToBase64String([byte[]](1..32))
+          $key2 = [Convert]::ToBase64String([byte[]](33..64))
+          @"
+          [Interface]
+          PrivateKey = $key1
+          Address = 10.222.0.2/32
+          Jc = 3
+          Jmin = 20
+          Jmax = 40
+          S1 = 12
+          S2 = 12
+          H1 = 123
+          H2 = 456
+
+          [Peer]
+          PublicKey = $key2
+          AllowedIPs = 198.51.100.1/32
+          Endpoint = 192.0.2.1:51820
+          PersistentKeepalive = 15
+          "@ | Set-Content -Encoding ascii $conf
+
+          try {
+            $cleanup = Start-Process -FilePath $exe -ArgumentList @('/uninstalltunnelservice','GreyVPNSmoke') -Wait -PassThru
+            $install = Start-Process -FilePath $exe -ArgumentList @('/installtunnelservice', $conf) -Wait -PassThru
+            if ($install.ExitCode -ne 0) { throw "AmneziaWG install tunnel service failed: $($install.ExitCode)" }
+            Start-Sleep -Milliseconds 1500
+            $svc = Get-Service -Name 'AmneziaWGTunnel$GreyVPNSmoke' -ErrorAction Stop
+            if ($svc.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Running) {
+              throw "AmneziaWG service status is $($svc.Status), expected Running"
+            }
+            Write-Host "Official AmneziaWG tunnel service lifecycle: RUNNING"
+          }
+          finally {
+            try { Start-Process -FilePath $exe -ArgumentList @('/uninstalltunnelservice','GreyVPNSmoke') -Wait | Out-Null } catch { }
+            try { Remove-Item $dir -Recurse -Force } catch { }
+          }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GreyVPN-v0.9-win-x64
+          path: GreyVPN\publish\**
+          if-no-files-found: error
