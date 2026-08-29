@@ -21,6 +21,7 @@ public static class AmneziaWgRealTester
 
     public static bool Supports(VpnProfile profile) => ConfigVault.Supports(profile);
     public static string EnginePath => Path.Combine(AppContext.BaseDirectory, "engines", "amneziawg", "amneziawg.exe");
+    public static string AwgToolPath => Path.Combine(AppContext.BaseDirectory, "engines", "amneziawg", "awg.exe");
 
     public static async Task TestAsync(VpnProfile profile, CancellationToken ct)
     {
@@ -39,13 +40,13 @@ public static class AmneziaWgRealTester
             if (!OperatingSystem.IsWindows())
             {
                 profile.RealStatus = "ENGINE ERROR";
-                profile.RealError = "Официальный AmneziaWG backend v0.9 предназначен для Windows.";
+                profile.RealError = "Официальный AmneziaWG backend предназначен для Windows.";
                 return;
             }
-            if (!File.Exists(EnginePath))
+            if (!File.Exists(EnginePath) || !File.Exists(AwgToolPath))
             {
                 profile.RealStatus = "ENGINE ERROR";
-                profile.RealError = "Не найден engines\\amneziawg\\amneziawg.exe.";
+                profile.RealError = "Не найдены engines\\amneziawg\\amneziawg.exe и/или awg.exe.";
                 return;
             }
             if (!IsAdministrator())
@@ -101,30 +102,85 @@ public static class AmneziaWgRealTester
                 return;
             }
 
-            string exitIp;
+            // Give the official service time to finish interface/route installation before the first packet.
+            await Task.Delay(700, ct).ConfigureAwait(false);
+            var before = await ReadTelemetryAsync(ct).ConfigureAwait(false);
+            AppendTelemetry(log, "Before probe", before);
+
+            string? probeIp = null;
+            string? probeError = null;
             try
             {
-                exitIp = await ProbeCloudflareAsync(ct, TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+                probeIp = await ProbeCloudflareAsync(ct, TimeSpan.FromSeconds(8)).ConfigureAwait(false);
+                log.AppendLine("HTTPS probe IP: " + probeIp);
             }
-            catch (TaskCanceledException) when (!ct.IsCancellationRequested)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                profile.RealStatus = "TIMEOUT";
-                profile.RealError = "AmneziaWG tunnel RUNNING, но тестовые HTTPS-маршруты не дали ответа.";
-                return;
+                probeError = Flatten(ex);
+                log.AppendLine("HTTPS probe failed: " + probeError);
             }
-            catch (HttpRequestException ex)
+
+            // Read the official userspace telemetry instead of assuming RUNNING == connected.
+            // Poll for a short period because the first data packet may initiate the handshake.
+            var after = before;
+            var telemetryUntil = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+            do
             {
-                profile.RealStatus = "NO INTERNET";
-                profile.RealError = ShortError(ex.Message);
+                after = await ReadTelemetryAsync(ct).ConfigureAwait(false);
+                if (after.HandshakeUnix > 0 || after.RxBytes > before.RxBytes)
+                    break;
+                await Task.Delay(450, ct).ConfigureAwait(false);
+            }
+            while (DateTime.UtcNow < telemetryUntil);
+            AppendTelemetry(log, "After probe", after);
+
+            var hasFreshHandshake = after.HandshakeUnix > 0 &&
+                                    DateTimeOffset.UtcNow.ToUnixTimeSeconds() - after.HandshakeUnix <= 180;
+            var receivedPayload = after.RxBytes > before.RxBytes || after.RxBytes > 0;
+            var sentPayload = after.TxBytes > before.TxBytes || after.TxBytes > 0;
+
+            if (!string.IsNullOrWhiteSpace(probeIp))
+            {
+                // A changed public IP is sufficient proof of a working tunnel. When the IP is
+                // unchanged, require AmneziaWG telemetry to prove that the probe actually used it.
+                var changedIp = string.IsNullOrWhiteSpace(baselineIp) ||
+                                !baselineIp.Equals(probeIp, StringComparison.OrdinalIgnoreCase);
+                if (changedIp || (hasFreshHandshake && (receivedPayload || sentPayload)))
+                {
+                    profile.ExitIp = probeIp;
+                    profile.RealStatus = "РАБОТАЕТ";
+                    profile.RealError = string.Empty;
+                    return;
+                }
+
+                profile.RealStatus = "ROUTE NOT USED";
+                profile.RealError = $"HTTPS доступен, но probe вышел через прежний IP {probeIp}, а свежий WG/AWG handshake не подтверждён.";
                 return;
             }
 
-            profile.ExitIp = exitIp;
-            profile.RealStatus = "РАБОТАЕТ";
-            profile.RealError = string.Empty;
-            log.AppendLine("Tunnel exit IP: " + exitIp);
-            if (!string.IsNullOrWhiteSpace(baselineIp) && baselineIp.Equals(exitIp, StringComparison.OrdinalIgnoreCase))
-                log.AppendLine("NOTE: tunnel exit IP equals baseline IP; status remains working because the exact /32 probe routes were installed by a RUNNING tunnel service.");
+            var dumpLog = await TryDumpLogAsync().ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(dumpLog))
+            {
+                log.AppendLine("[AMNEZIAWG LOG AFTER FAILED PROBE]");
+                log.AppendLine(dumpLog);
+            }
+
+            if (!hasFreshHandshake)
+            {
+                profile.RealStatus = "NO HANDSHAKE";
+                profile.RealError = ShortError($"Служба AmneziaWG RUNNING, но свежего handshake с peer нет. TX={after.TxBytes}, RX={after.RxBytes}. {probeError}");
+                return;
+            }
+
+            if (!receivedPayload)
+            {
+                profile.RealStatus = "NO RX";
+                profile.RealError = ShortError($"Handshake есть, но полезных входящих данных не получено. TX={after.TxBytes}, RX={after.RxBytes}. {probeError}");
+                return;
+            }
+
+            profile.RealStatus = IsHostUnreachable(probeError) ? "ROUTE ERROR" : "NO INTERNET";
+            profile.RealError = ShortError($"Handshake подтверждён, RX={after.RxBytes}, TX={after.TxBytes}, но HTTPS probe не прошёл. {probeError}");
         }
         catch (FileNotFoundException ex)
         {
@@ -160,9 +216,58 @@ public static class AmneziaWgRealTester
         }
     }
 
+    private static async Task<TunnelTelemetry> ReadTelemetryAsync(CancellationToken ct)
+    {
+        long handshake = 0;
+        long rx = 0;
+        long tx = 0;
+        var errors = new List<string>();
+
+        var hs = await RunAwgToolAsync(new[] { "show", TestTunnelName, "latest-handshakes" }, TimeSpan.FromSeconds(4), ct).ConfigureAwait(false);
+        if (hs.ExitCode == 0)
+        {
+            foreach (var line in SplitLines(hs.Text))
+            {
+                var parts = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length >= 2 && long.TryParse(parts[^1], out var value)) handshake = Math.Max(handshake, value);
+            }
+        }
+        else if (!string.IsNullOrWhiteSpace(hs.Text)) errors.Add("handshake: " + ShortError(hs.Text));
+
+        var transfer = await RunAwgToolAsync(new[] { "show", TestTunnelName, "transfer" }, TimeSpan.FromSeconds(4), ct).ConfigureAwait(false);
+        if (transfer.ExitCode == 0)
+        {
+            foreach (var line in SplitLines(transfer.Text))
+            {
+                var parts = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length >= 3 && long.TryParse(parts[^2], out var rxValue) && long.TryParse(parts[^1], out var txValue))
+                {
+                    rx = Math.Max(rx, rxValue);
+                    tx = Math.Max(tx, txValue);
+                }
+            }
+        }
+        else if (!string.IsNullOrWhiteSpace(transfer.Text)) errors.Add("transfer: " + ShortError(transfer.Text));
+
+        return new TunnelTelemetry(handshake, rx, tx, string.Join(" | ", errors));
+    }
+
+    private static IEnumerable<string> SplitLines(string value) =>
+        value.Replace("\r", string.Empty).Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    private static void AppendTelemetry(StringBuilder log, string label, TunnelTelemetry t)
+    {
+        var age = t.HandshakeUnix > 0 ? Math.Max(0, DateTimeOffset.UtcNow.ToUnixTimeSeconds() - t.HandshakeUnix).ToString() + "s" : "none";
+        log.AppendLine($"Telemetry {label}: handshakeAge={age}; RX={t.RxBytes}; TX={t.TxBytes}" +
+                       (string.IsNullOrWhiteSpace(t.Error) ? string.Empty : "; error=" + t.Error));
+    }
+
     private static async Task CleanupStaleTunnelAsync(StringBuilder log)
     {
         if (!File.Exists(EnginePath)) return;
+        var service = QueryService(TestServiceName);
+        if (service.State == ServiceState.Missing) return;
+
         var cleanup = await RunEngineAsync(new[] { "/uninstalltunnelservice", TestTunnelName }, TimeSpan.FromSeconds(8), CancellationToken.None).ConfigureAwait(false);
         if (cleanup.ExitCode == 0)
             log.AppendLine("Cleanup tunnel service: OK");
@@ -184,12 +289,18 @@ public static class AmneziaWgRealTester
         }
     }
 
-    private static async Task<(int ExitCode, string Text)> RunEngineAsync(string[] args, TimeSpan timeout, CancellationToken ct)
+    private static Task<(int ExitCode, string Text)> RunAwgToolAsync(string[] args, TimeSpan timeout, CancellationToken ct) =>
+        RunProcessAsync(AwgToolPath, Path.GetDirectoryName(AwgToolPath)!, args, timeout, ct);
+
+    private static Task<(int ExitCode, string Text)> RunEngineAsync(string[] args, TimeSpan timeout, CancellationToken ct) =>
+        RunProcessAsync(EnginePath, Path.GetDirectoryName(EnginePath)!, args, timeout, ct);
+
+    private static async Task<(int ExitCode, string Text)> RunProcessAsync(string file, string workingDirectory, string[] args, TimeSpan timeout, CancellationToken ct)
     {
         var psi = new ProcessStartInfo
         {
-            FileName = EnginePath,
-            WorkingDirectory = Path.GetDirectoryName(EnginePath)!,
+            FileName = file,
+            WorkingDirectory = workingDirectory,
             UseShellExecute = false,
             CreateNoWindow = true,
             RedirectStandardOutput = true,
@@ -197,7 +308,7 @@ public static class AmneziaWgRealTester
         };
         foreach (var arg in args) psi.ArgumentList.Add(arg);
 
-        using var process = Process.Start(psi) ?? throw new InvalidOperationException("Не удалось запустить amneziawg.exe.");
+        using var process = Process.Start(psi) ?? throw new InvalidOperationException("Не удалось запустить " + Path.GetFileName(file) + ".");
         var stdout = process.StandardOutput.ReadToEndAsync();
         var stderr = process.StandardError.ReadToEndAsync();
         using var timer = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -214,7 +325,7 @@ public static class AmneziaWgRealTester
                 try { await process.WaitForExitAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false); } catch { }
             }
             if (ct.IsCancellationRequested) throw;
-            throw new TimeoutException($"amneziawg.exe не завершил команду за {timeout.TotalSeconds:0} с.");
+            throw new TimeoutException($"{Path.GetFileName(file)} не завершил команду за {timeout.TotalSeconds:0} с.");
         }
         var text = ((await stdout.ConfigureAwait(false)) + Environment.NewLine + (await stderr.ConfigureAwait(false))).Trim();
         return (process.ExitCode, text);
@@ -241,7 +352,7 @@ public static class AmneziaWgRealTester
                     Version = HttpVersion.Version11,
                     VersionPolicy = HttpVersionPolicy.RequestVersionOrLower
                 };
-                request.Headers.UserAgent.ParseAdd("GreyVPN/0.9-real-test");
+                request.Headers.UserAgent.ParseAdd("GreyVPN/0.9.1-real-test");
                 using var response = await client.SendAsync(request, HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false);
                 var text = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
                 if (!response.IsSuccessStatusCode)
@@ -323,6 +434,9 @@ public static class AmneziaWgRealTester
         return "CONNECT ERROR";
     }
 
+    private static bool IsHostUnreachable(string? value) =>
+        !string.IsNullOrWhiteSpace(value) && ContainsAny(value, "unreachable host", "недоступного хоста", "no route to host", "network is unreachable");
+
     private static bool ContainsAny(string value, params string[] needles) =>
         needles.Any(n => value.Contains(n, StringComparison.OrdinalIgnoreCase));
 
@@ -338,9 +452,10 @@ public static class AmneziaWgRealTester
     {
         if (string.IsNullOrWhiteSpace(value)) return string.Empty;
         var oneLine = value.Replace('\r', ' ').Replace('\n', ' ').Trim();
-        return oneLine.Length <= 1200 ? oneLine : oneLine[..1200] + "…";
+        return oneLine.Length <= 1400 ? oneLine : oneLine[..1400] + "…";
     }
 
+    private readonly record struct TunnelTelemetry(long HandshakeUnix, long RxBytes, long TxBytes, string Error);
     private readonly record struct ServiceStatusResult(ServiceState State, uint Win32ExitCode, uint ServiceSpecificExitCode);
 
     private enum ServiceState : uint
