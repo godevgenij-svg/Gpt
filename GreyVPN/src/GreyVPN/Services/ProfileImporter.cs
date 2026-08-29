@@ -256,7 +256,8 @@ public static partial class ProfileImporter
         text = string.Empty;
         try
         {
-            var normalized = WebUtility.UrlDecode(value).Trim().Replace('-', '+').Replace('_', '/');
+            // VMess payload is opaque Base64, not form data: '+' must stay '+', not become a space.
+            var normalized = Uri.UnescapeDataString(value).Trim().Replace('-', '+').Replace('_', '/');
             var mod = normalized.Length % 4;
             if (mod == 2) normalized += "==";
             else if (mod == 3) normalized += "=";
