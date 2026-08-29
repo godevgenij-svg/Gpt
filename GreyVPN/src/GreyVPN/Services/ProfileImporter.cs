@@ -39,36 +39,21 @@ public static partial class ProfileImporter
 
                 switch (extension)
                 {
-                    case ".ovpn":
-                        result.Add(ParseOpenVpn(file, text));
-                        break;
-                    case ".conf":
-                        result.Add(ParseWireGuardFamily(file, text));
-                        break;
-                    case ".txt":
-                        result.AddRange(ParseUriList(file, text));
-                        break;
-                    case ".json":
-                        result.Add(ParseGeneric(file, "Xray/JSON", text));
-                        break;
+                    case ".ovpn": result.Add(ParseOpenVpn(file, text)); break;
+                    case ".conf": result.Add(ParseWireGuardFamily(file, text)); break;
+                    case ".txt": result.AddRange(ParseUriList(file, text)); break;
+                    case ".json": result.Add(ParseGeneric(file, "Xray/JSON", text)); break;
                     case ".yaml":
-                    case ".yml":
-                        result.Add(ParseGeneric(file, "Clash/Mihomo", text));
-                        break;
-                    case ".vpn":
-                        result.Add(ParseGeneric(file, "Amnezia backup/config", text));
-                        break;
+                    case ".yml": result.Add(ParseGeneric(file, "Clash/Mihomo", text)); break;
+                    case ".vpn": result.Add(ParseGeneric(file, "Amnezia backup/config", text)); break;
                 }
             }
             catch (Exception ex)
             {
                 result.Add(new VpnProfile
                 {
-                    Name = Path.GetFileName(file),
-                    Type = "Ошибка импорта",
-                    SourcePath = file,
-                    Status = "Ошибка",
-                    Error = ex.Message
+                    Name = Path.GetFileName(file), Type = "Ошибка импорта", SourcePath = file,
+                    Status = "Ошибка", Error = ex.Message
                 });
             }
         }
@@ -78,15 +63,9 @@ public static partial class ProfileImporter
 
     public static void RefreshParsedFields(VpnProfile profile)
     {
-        if (profile.PingMs is null && profile.LatencyMs is not null)
-            profile.PingMs = profile.LatencyMs;
-
-        if (string.IsNullOrWhiteSpace(profile.RawValue) || !profile.RawValue.Contains("://", StringComparison.Ordinal))
-            return;
-
-        if (!TryParseProxyUri(profile.RawValue.Trim(), out var parsed))
-            return;
-
+        if (profile.PingMs is null && profile.LatencyMs is not null) profile.PingMs = profile.LatencyMs;
+        if (string.IsNullOrWhiteSpace(profile.RawValue) || !profile.RawValue.Contains("://", StringComparison.Ordinal)) return;
+        if (!TryParseProxyUri(profile.RawValue.Trim(), out var parsed)) return;
         if (!string.IsNullOrWhiteSpace(parsed.Name)) profile.Name = parsed.Name;
         profile.Type = parsed.Type;
         profile.Endpoint = parsed.Endpoint;
@@ -99,15 +78,11 @@ public static partial class ProfileImporter
         var proto = ProtoRegex().Match(text).Groups[1].Value.Trim();
         var host = remote.Success ? remote.Groups[1].Value.Trim() : string.Empty;
         var port = remote.Success ? remote.Groups[2].Value.Trim() : string.Empty;
-
         return new VpnProfile
         {
-            Name = Path.GetFileNameWithoutExtension(path),
-            Type = "OpenVPN",
-            Endpoint = JoinEndpoint(host, port),
-            Transport = string.IsNullOrWhiteSpace(proto) ? "unknown" : proto,
-            SourcePath = path,
-            RawValue = string.Empty
+            Name = Path.GetFileNameWithoutExtension(path), Type = "OpenVPN",
+            Endpoint = JoinEndpoint(host, port), Transport = string.IsNullOrWhiteSpace(proto) ? "unknown" : proto,
+            SourcePath = path, RawValue = string.Empty
         };
     }
 
@@ -116,32 +91,22 @@ public static partial class ProfileImporter
         var endpointMatch = EndpointRegex().Match(text);
         var endpoint = endpointMatch.Success ? endpointMatch.Groups[1].Value.Trim() : string.Empty;
         var isAwg = AwgMarkerRegex().IsMatch(text);
-
         return new VpnProfile
         {
-            Name = Path.GetFileNameWithoutExtension(path),
-            Type = isAwg ? "AmneziaWG" : "WireGuard",
-            Endpoint = endpoint,
-            Transport = "udp",
-            SourcePath = path,
-            RawValue = string.Empty
+            Name = Path.GetFileNameWithoutExtension(path), Type = isAwg ? "AmneziaWG" : "WireGuard",
+            Endpoint = endpoint, Transport = "udp", SourcePath = path, RawValue = string.Empty
         };
     }
 
     private static IEnumerable<VpnProfile> ParseUriList(string path, string text)
     {
         var parsed = ParseUriLines(text).ToList();
-
-        // A large part of public V2Ray subscriptions is a Base64-encoded list of links.
-        if (parsed.Count == 0 && TryDecodeBase64(text.Trim(), out var decoded))
-            parsed = ParseUriLines(decoded).ToList();
-
+        if (parsed.Count == 0 && TryDecodeBase64(text.Trim(), out var decoded)) parsed = ParseUriLines(decoded).ToList();
         if (parsed.Count == 0)
         {
             yield return ParseGeneric(path, "TXT", text);
             yield break;
         }
-
         foreach (var profile in parsed)
         {
             profile.SourcePath = path;
@@ -152,53 +117,34 @@ public static partial class ProfileImporter
     private static IEnumerable<VpnProfile> ParseUriLines(string text)
     {
         foreach (var line in text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
-                     .Select(x => x.Trim())
-                     .Where(x => x.Length > 0 && !x.StartsWith('#')))
-        {
-            if (TryParseProxyUri(line, out var profile))
-                yield return profile;
-        }
+                     .Select(x => x.Trim()).Where(x => x.Length > 0 && !x.StartsWith('#')))
+            if (TryParseProxyUri(line, out var profile)) yield return profile;
     }
 
     private static bool TryParseProxyUri(string raw, out VpnProfile profile)
     {
         profile = new VpnProfile();
-
         var schemeEnd = raw.IndexOf("://", StringComparison.Ordinal);
-        if (schemeEnd <= 0)
-            return false;
-
+        if (schemeEnd <= 0) return false;
         var scheme = raw[..schemeEnd];
-        if (!ProxySchemes.Contains(scheme))
-            return false;
-
-        if (scheme.Equals("vmess", StringComparison.OrdinalIgnoreCase) && TryParseVmess(raw, out profile))
-            return true;
+        if (!ProxySchemes.Contains(scheme)) return false;
+        if (scheme.Equals("vmess", StringComparison.OrdinalIgnoreCase) && TryParseVmess(raw, out profile)) return true;
 
         string name = scheme.ToUpperInvariant();
         string endpoint;
-
         if (Uri.TryCreate(raw, UriKind.Absolute, out var uri) && !string.IsNullOrWhiteSpace(uri.Host))
         {
             var port = uri.Port > 0 ? uri.Port : DefaultPortForScheme(scheme);
             endpoint = port > 0 ? JoinEndpoint(uri.Host, port.ToString()) : uri.Host;
-            if (!string.IsNullOrWhiteSpace(uri.Fragment))
-                name = Uri.UnescapeDataString(uri.Fragment.TrimStart('#'));
+            if (!string.IsNullOrWhiteSpace(uri.Fragment)) name = Uri.UnescapeDataString(uri.Fragment.TrimStart('#'));
         }
-        else
-        {
-            endpoint = TryExtractAuthority(raw);
-        }
+        else endpoint = TryExtractAuthority(raw);
 
         profile = new VpnProfile
         {
             Name = string.IsNullOrWhiteSpace(name) ? scheme.ToUpperInvariant() : name,
-            Type = scheme.ToUpperInvariant(),
-            Endpoint = endpoint,
-            Transport = GuessTransport(raw),
-            RawValue = raw
+            Type = scheme.ToUpperInvariant(), Endpoint = endpoint, Transport = GuessTransport(raw), RawValue = raw
         };
-
         return true;
     }
 
@@ -211,41 +157,28 @@ public static partial class ProfileImporter
             var hash = payload.IndexOf('#');
             if (hash >= 0) payload = payload[..hash];
             payload = payload.Trim();
-
-            if (!TryDecodeBase64(payload, out var json))
-                return false;
-
+            if (!TryDecodeBase64(payload, out var json)) return false;
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
             var host = GetJsonText(root, "add");
             var port = GetJsonText(root, "port");
             var name = GetJsonText(root, "ps");
             var transport = GetJsonText(root, "net");
-
-            if (string.IsNullOrWhiteSpace(host))
-                return false;
-
+            if (string.IsNullOrWhiteSpace(host)) return false;
             profile = new VpnProfile
             {
-                Name = string.IsNullOrWhiteSpace(name) ? "VMESS" : name,
-                Type = "VMESS",
-                Endpoint = JoinEndpoint(host, port),
-                Transport = string.IsNullOrWhiteSpace(transport) ? "tcp" : transport,
+                Name = string.IsNullOrWhiteSpace(name) ? "VMESS" : name, Type = "VMESS",
+                Endpoint = JoinEndpoint(host, port), Transport = string.IsNullOrWhiteSpace(transport) ? "tcp" : transport,
                 RawValue = raw
             };
             return true;
         }
-        catch
-        {
-            return false;
-        }
+        catch { return false; }
     }
 
     private static string GetJsonText(JsonElement root, string property)
     {
-        if (!root.TryGetProperty(property, out var value))
-            return string.Empty;
-
+        if (!root.TryGetProperty(property, out var value)) return string.Empty;
         return value.ValueKind switch
         {
             JsonValueKind.String => value.GetString() ?? string.Empty,
@@ -264,45 +197,33 @@ public static partial class ProfileImporter
             if (mod == 2) normalized += "==";
             else if (mod == 3) normalized += "=";
             else if (mod == 1) return false;
-
             text = Encoding.UTF8.GetString(Convert.FromBase64String(normalized));
             return true;
         }
-        catch
-        {
-            return false;
-        }
+        catch { return false; }
     }
 
     private static VpnProfile ParseGeneric(string path, string type, string text) => new()
     {
-        Name = Path.GetFileNameWithoutExtension(path),
-        Type = type,
-        SourcePath = path,
-        RawValue = text.Length <= 64_000 ? text : string.Empty,
-        Status = "Импортирован"
+        Name = Path.GetFileNameWithoutExtension(path), Type = type, SourcePath = path,
+        RawValue = text.Length <= 64_000 ? text : string.Empty, Status = "Импортирован"
     };
 
     private static IReadOnlyList<VpnProfile> Deduplicate(IEnumerable<VpnProfile> profiles)
     {
         var result = new List<VpnProfile>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
         foreach (var profile in profiles)
         {
             var identity = BuildIdentity(profile);
-            if (seen.Add(identity))
-                result.Add(profile);
+            if (seen.Add(identity)) result.Add(profile);
         }
-
         return result;
     }
 
     private static string BuildIdentity(VpnProfile p)
     {
-        if (!string.IsNullOrWhiteSpace(p.RawValue) && p.RawValue.Contains("://", StringComparison.Ordinal))
-            return $"uri|{p.RawValue.Trim()}";
-
+        if (!string.IsNullOrWhiteSpace(p.RawValue) && p.RawValue.Contains("://", StringComparison.Ordinal)) return $"uri|{p.RawValue.Trim()}";
         return $"file|{Path.GetFullPath(p.SourcePath)}|{p.Type}|{p.Name}";
     }
 
@@ -310,44 +231,37 @@ public static partial class ProfileImporter
     {
         host = string.Empty;
         port = 0;
-        if (string.IsNullOrWhiteSpace(endpoint))
-            return false;
-
+        if (string.IsNullOrWhiteSpace(endpoint)) return false;
         var value = endpoint.Trim();
 
-        // A bare IPv6 address contains colons but no port. Handle it before host:port parsing.
+        // Parse bracketed IPv6 first. IPAddress.TryParse may accept bracket syntax on some runtimes,
+        // but an appended :port must never be mistaken for part of the address.
+        if (value.StartsWith('['))
+        {
+            var close = value.IndexOf(']');
+            if (close <= 0) return false;
+            host = value[1..close];
+            if (!IPAddress.TryParse(host, out _)) return false;
+            if (close == value.Length - 1) return true;
+            if (close + 2 < value.Length && value[close + 1] == ':' &&
+                int.TryParse(value[(close + 2)..], out port) && port is > 0 and <= 65535) return true;
+            return false;
+        }
+
+        // Bare IPv6 has colons but no port.
         if (IPAddress.TryParse(value, out _))
         {
             host = value;
             return true;
         }
 
-        if (value.StartsWith('['))
-        {
-            var close = value.IndexOf(']');
-            if (close <= 0)
-                return false;
-
-            host = value[1..close];
-            if (close == value.Length - 1)
-                return IPAddress.TryParse(host, out _);
-
-            if (close + 2 <= value.Length && value[close + 1] == ':' &&
-                int.TryParse(value[(close + 2)..], out port) && port is > 0 and <= 65535)
-                return true;
-
-            return false;
-        }
-
         var colon = value.LastIndexOf(':');
         if (colon > 0 && int.TryParse(value[(colon + 1)..], out port))
         {
-            if (port is < 1 or > 65535)
-                return false;
+            if (port is < 1 or > 65535) return false;
             host = value[..colon];
             return !string.IsNullOrWhiteSpace(host);
         }
-
         host = value;
         port = 0;
         return true;
@@ -357,14 +271,10 @@ public static partial class ProfileImporter
     {
         var at = raw.LastIndexOf('@');
         var start = at >= 0 ? at + 1 : raw.IndexOf("://", StringComparison.Ordinal) + 3;
-        if (start < 3 || start >= raw.Length)
-            return string.Empty;
-
+        if (start < 3 || start >= raw.Length) return string.Empty;
         var endCandidates = new[] { raw.IndexOf('/', start), raw.IndexOf('?', start), raw.IndexOf('#', start) }
-            .Where(x => x >= 0)
-            .DefaultIfEmpty(raw.Length);
-        var end = endCandidates.Min();
-        return raw[start..end];
+            .Where(x => x >= 0).DefaultIfEmpty(raw.Length);
+        return raw[start..endCandidates.Min()];
     }
 
     private static string GuessTransport(string raw)
@@ -394,13 +304,10 @@ public static partial class ProfileImporter
 
     [GeneratedRegex(@"(?im)^\s*remote\s+([^\s#;]+)(?:\s+(\d+))?")]
     private static partial Regex RemoteRegex();
-
     [GeneratedRegex(@"(?im)^\s*proto\s+([^\s#;]+)")]
     private static partial Regex ProtoRegex();
-
     [GeneratedRegex(@"(?im)^\s*Endpoint\s*=\s*([^\r\n#;]+)")]
     private static partial Regex EndpointRegex();
-
     [GeneratedRegex(@"(?im)^\s*(?:Jc|Jmin|Jmax|S1|S2|H1|H2|H3|H4|I1|I2|I3|I4|I5)\s*=")]
     private static partial Regex AwgMarkerRegex();
 }
