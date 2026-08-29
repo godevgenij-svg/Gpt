@@ -9,6 +9,7 @@ on:
       - greyvpn-v0.4
       - greyvpn-v0.5
       - greyvpn-v0.6
+      - greyvpn-v0.6.1
     paths:
       - 'GreyVPN/**'
       - '.github/workflows/greyvpn-build.yml'
@@ -25,7 +26,9 @@ jobs:
           dotnet-version: '8.0.x'
 
       - name: Restore
-        run: dotnet restore .\GreyVPN\src\GreyVPN\GreyVPN.csproj
+        run: |
+          dotnet restore .\GreyVPN\src\GreyVPN\GreyVPN.csproj
+          dotnet restore .\GreyVPN\tests\GreyVPN.Smoke\GreyVPN.Smoke.csproj
 
       - name: Publish win-x64
         run: dotnet publish .\GreyVPN\src\GreyVPN\GreyVPN.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o .\GreyVPN\publish
@@ -33,6 +36,7 @@ jobs:
       - name: Bundle sing-box 1.13.19
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $url = 'https://github.com/SagerNet/sing-box/releases/download/v1.13.19/sing-box-1.13.19-windows-amd64.zip'
           Invoke-WebRequest -Uri $url -OutFile sing-box.zip
           Expand-Archive sing-box.zip -DestinationPath sing-box-dist
@@ -41,6 +45,7 @@ jobs:
           if (-not $exe) { throw 'sing-box.exe not found in official archive' }
           Copy-Item $exe.FullName .\GreyVPN\publish\engines\sing-box.exe
           .\GreyVPN\publish\engines\sing-box.exe version
+          if ($LASTEXITCODE -ne 0) { throw "sing-box version failed: $LASTEXITCODE" }
           @"
           sing-box 1.13.19
           Source: https://github.com/SagerNet/sing-box
@@ -66,21 +71,6 @@ jobs:
           Copy-Item (Join-Path $xray.Directory.FullName '*') $engineDir -Recurse -Force
           & (Join-Path $engineDir 'xray.exe') version
           if ($LASTEXITCODE -ne 0) { throw "xray.exe version failed: $LASTEXITCODE" }
-
-          @'
-          {
-            "log":{"loglevel":"warning"},
-            "inbounds":[{"listen":"127.0.0.1","port":18081,"protocol":"http","settings":{}}],
-            "outbounds":[{
-              "protocol":"vless",
-              "settings":{"address":"example.com","port":443,"id":"00000000-0000-0000-0000-000000000001","encryption":"none"},
-              "streamSettings":{"method":"xhttp","security":"tls","tlsSettings":{"serverName":"example.com"},"xhttpSettings":{"path":"/","mode":"stream-up"}}
-            }]
-          }
-          '@ | Set-Content -Encoding UTF8 .\xray-smoke.json
-          & (Join-Path $engineDir 'xray.exe') run -test -c .\xray-smoke.json
-          if ($LASTEXITCODE -ne 0) { throw "Xray XHTTP smoke config failed: $LASTEXITCODE" }
-
           @"
           Xray-core v26.7.28 (official prerelease)
           Source: https://github.com/XTLS/Xray-core/releases/tag/v26.7.28
@@ -130,21 +120,34 @@ jobs:
           Wintun SHA2-256 archive: 07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51
           "@ | Set-Content -Encoding UTF8 (Join-Path $engineDir 'THIRD_PARTY_OpenVPN_Wintun.txt')
 
-      - name: Verify packaged engines
+      - name: Verify packaged engines and application version
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           if (-not (Test-Path .\GreyVPN\publish\GreyVPN.exe)) { throw 'GreyVPN.exe missing' }
           if (-not (Test-Path .\GreyVPN\publish\engines\sing-box.exe)) { throw 'sing-box.exe missing' }
           if (-not (Test-Path .\GreyVPN\publish\engines\xray\xray.exe)) { throw 'xray.exe missing' }
           if (-not (Test-Path .\GreyVPN\publish\engines\openvpn\openvpn.exe)) { throw 'openvpn.exe missing' }
           if (-not (Test-Path .\GreyVPN\publish\engines\openvpn\wintun.dll)) { throw 'wintun.dll missing' }
+          $fv = (Get-Item .\GreyVPN\publish\GreyVPN.exe).VersionInfo.FileVersion
+          Write-Host "GreyVPN FileVersion: $fv"
+          if (-not $fv.StartsWith('0.6.1')) { throw "Unexpected GreyVPN FileVersion: $fv" }
           .\GreyVPN\publish\engines\sing-box.exe version | Select-Object -First 1
           .\GreyVPN\publish\engines\xray\xray.exe version | Select-Object -First 2
           .\GreyVPN\publish\engines\openvpn\openvpn.exe --version | Select-Object -First 2
 
+      - name: Run generated-config smoke tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet run --project .\GreyVPN\tests\GreyVPN.Smoke\GreyVPN.Smoke.csproj -c Release --no-restore -- `
+            .\GreyVPN\publish\engines\xray\xray.exe `
+            .\GreyVPN\publish\engines\sing-box.exe
+          if ($LASTEXITCODE -ne 0) { throw "GreyVPN smoke tests failed: $LASTEXITCODE" }
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: GreyVPN-v0.6-win-x64
+          name: GreyVPN-v0.6.1-win-x64
           path: GreyVPN\publish\**
           if-no-files-found: error
