@@ -1,7 +1,7 @@
 <Window x:Class="GreyVPN.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="GreyVPN v0.5" Height="800" Width="1540" MinHeight="600" MinWidth="1050"
+        Title="GreyVPN v0.6" Height="800" Width="1540" MinHeight="600" MinWidth="1050"
         WindowStartupLocation="CenterScreen">
     <DockPanel Margin="10">
         <StackPanel DockPanel.Dock="Top" Margin="0,0,0,10">
@@ -21,14 +21,12 @@
                 <Button Content="Показать все" Width="105" Margin="0,0,8,0" Click="ShowAll_Click"/>
                 <Button Content="Экспорт откликнувшихся" Width="175" Margin="0,0,8,0" Click="ExportResponsive_Click"/>
                 <TextBlock Margin="18,4,0,0" Foreground="DimGray"
-                           Text="REAL: OpenVPN / VLESS / VMESS / Trojan / Hysteria2 / WireGuard / SS / SOCKS / HTTP(S). OpenVPN: запуск от администратора."/>
+                           Text="REAL: Xray = VLESS / VMESS / Trojan + XHTTP; sing-box = Hysteria2 / WireGuard / SS / SOCKS / HTTP(S); OpenVPN отдельно. OpenVPN: запуск от администратора."/>
             </WrapPanel>
         </StackPanel>
 
         <StatusBar DockPanel.Dock="Bottom" Margin="0,8,0,0">
-            <StatusBarItem>
-                <TextBlock x:Name="StatusText" Text="Готово"/>
-            </StatusBarItem>
+            <StatusBarItem><TextBlock x:Name="StatusText" Text="Готово"/></StatusBarItem>
         </StatusBar>
 
         <DataGrid x:Name="ProfilesGrid"
@@ -51,7 +49,7 @@
                 <DataGridTextColumn Header="Exit IP" Binding="{Binding ExitIp}" Width="115"/>
                 <DataGridTextColumn Header="Real, ms" Binding="{Binding RealTestMs}" Width="70"/>
                 <DataGridTextColumn Header="Последний real" Binding="{Binding LastRealTested, StringFormat={}{0:dd.MM HH:mm:ss}}" Width="105"/>
-                <DataGridTextColumn Header="Ошибка real" Binding="{Binding RealError}" Width="2*"/>
+                <DataGridTextColumn Header="Ошибка real" Binding="{Binding RealError}" Width="2.5*"/>
                 <DataGridTextColumn Header="Ошибка предтеста" Binding="{Binding Error}" Width="1.5*"/>
             </DataGrid.Columns>
         </DataGrid>
