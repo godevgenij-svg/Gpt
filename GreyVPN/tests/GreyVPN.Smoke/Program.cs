@@ -136,12 +136,12 @@ static async Task TestSingBoxBuilders(string singBox, string temp)
     var ssCredentials = Convert.ToBase64String(Encoding.UTF8.GetBytes("aes-128-gcm:password")).TrimEnd('=');
     var samples = new List<VpnProfile>
     {
-        P("hy2", "HYSTERIA2", "hysteria2://secret@example.com:443?sni=example.com&insecure=1"),
+        P("hy2-default-port", "HYSTERIA2", "hysteria2://secret@example.com?sni=example.com&insecure=1"),
         new() { Name = "wireguard", Type = "WireGuard", SourcePath = wgPath },
         P("ss", "SS", $"ss://{ssCredentials}@example.com:8388"),
         P("socks", "SOCKS", "socks://user:pass@example.com:1080"),
         P("http", "HTTP", "http://user:pass@example.com:8080"),
-        P("https", "HTTPS", "https://user:pass@example.com:443")
+        P("https", "HTTPS", "https://user:pass@example.com")
     };
 
     var i = 0;
