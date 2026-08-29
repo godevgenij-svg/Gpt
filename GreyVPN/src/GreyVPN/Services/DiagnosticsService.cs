@@ -37,10 +37,10 @@ public static class DiagnosticsService
         @"(?i)(?<prefix>[?&](?:password|passwd|pass|token|secret|uuid|id|key|psk|privatekey|presharedkey)=)[^&#\s]+",
         RegexOptions.Compiled);
     private static readonly Regex WindowsUserRoot = new(
-        @"(?i)(?<prefix>\b[A-Z]:\\Users\\)[^\\\r\n\t|\"']+",
+        @"(?i)(?<prefix>\b[A-Z]:\\Users\\)[^\\\r\n\t|]+",
         RegexOptions.Compiled);
     private static readonly Regex UnixUserRoot = new(
-        @"(?i)(?<prefix>/(?:home|Users)/)[^/\s|\"']+",
+        @"(?i)(?<prefix>/(?:home|Users)/)[^/\s|]+",
         RegexOptions.Compiled);
 
     private static string? _sessionRoot;
