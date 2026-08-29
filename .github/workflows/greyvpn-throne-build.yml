@@ -1,0 +1,163 @@
+name: GreyVPN Throne-base Windows build
+
+on:
+  push:
+    branches:
+      - greyvpn-throne-v0.1
+    paths:
+      - '.github/workflows/greyvpn-throne-build.yml'
+  workflow_dispatch:
+
+jobs:
+  build-go:
+    runs-on: ubuntu-22.04
+    env:
+      DEST: ${{ github.workspace }}/deployment/windows-amd64
+    steps:
+      - name: Checkout pinned Throne source
+        uses: actions/checkout@v4.3.1
+        with:
+          repository: throneproj/Throne
+          ref: 583fa089f6e969a08a25fc7da2c118a2f4947849
+          fetch-depth: 1
+
+      - name: Setup Go
+        uses: actions/setup-go@v6.5.0
+        with:
+          go-version: '1.26.5'
+          cache-dependency-path: core/server/go.sum
+
+      - name: Setup protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: '31.1'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install protobuf generators
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
+
+      - name: Build Throne core for Windows x64
+        shell: bash
+        run: |
+          set -euo pipefail
+          GOOS=windows GOARCH=amd64 ./script/build_go.sh
+          test -d deployment/windows-amd64
+          tar czf artifacts.tgz ./deployment
+
+      - name: Upload core artifact
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: GreyVPN-Throne-Core-${{ github.sha }}
+          path: artifacts.tgz
+          compression-level: 0
+
+  build-windows:
+    runs-on: windows-latest
+    needs: build-go
+    env:
+      INPUT_VERSION: 'GreyVPN-Throne-v0.1'
+      DEST: ${{ github.workspace }}/deployment/windows-amd64
+      DEST_SUFFIX: windows-amd64
+      ARCH: x64
+    steps:
+      - name: Checkout pinned Throne source
+        uses: actions/checkout@v4.3.1
+        with:
+          repository: throneproj/Throne
+          ref: 583fa089f6e969a08a25fc7da2c118a2f4947849
+          fetch-depth: 1
+
+      - name: Checkout sing-box dashboard
+        uses: actions/checkout@v4.3.1
+        with:
+          repository: SagerNet/sing-box-dashboard
+          ref: gh-pages
+          path: dashboard-src
+
+      - name: Bundle dashboard
+        shell: bash
+        run: |
+          rm -rf dashboard-src/.git || true
+          cp -R dashboard-src/. res/dashboard/
+          test -f res/dashboard/index.html
+
+      - name: Apply GreyVPN branding marker
+        shell: pwsh
+        run: |
+          $path = 'src/ui/mainWindow/mainwindow_setup.cpp'
+          $text = Get-Content $path -Raw
+          if (-not $text.Contains('software_name = "Throne";')) { throw 'Expected software_name assignment not found' }
+          $text = $text.Replace('software_name = "Throne";', 'software_name = "GreyVPN (Throne base)";')
+          Set-Content -Path $path -Value $text -Encoding UTF8
+
+      - name: Install MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Download core artifact
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: GreyVPN-Throne-Core-${{ github.sha }}
+          path: download-artifact
+
+      - name: Download Qt 6.11.1 and OpenSSL
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL -o qt.7z https://github.com/throneproj/buildqt/releases/download/Qt_6.11.1/Qt_6.11.1_x64.7z
+          curl -fL -o openssl.7z https://github.com/throneproj/env_windows_legacy/releases/download/latest/openssl_x64.7z
+          7z x qt.7z >/dev/null
+          7z x openssl.7z >/dev/null
+
+      - name: Build Windows x64
+        shell: bash
+        run: |
+          set -euo pipefail
+          export CMAKE_PREFIX_PATH="$PWD/Qt/lib/cmake"
+          export OPENSSL_ROOT_DIR="$PWD/openssl"
+          mkdir build
+          cd build
+          curl -fLso srslist.h https://raw.githubusercontent.com/throneproj/routeprofiles/rule-set/srslist.h
+          cmake -GNinja -DCMAKE_BUILD_TYPE=RelWithDebInfo ..
+          ninja
+          cd ..
+          ./script/deploy_windows.sh
+
+      - name: Prepare GreyVPN package
+        shell: pwsh
+        run: |
+          $dest = 'deployment/windows-amd64'
+          if (-not (Test-Path "$dest/Throne.exe")) { throw 'Throne.exe was not produced' }
+          if (-not (Test-Path "$dest/ThroneCore.exe")) { throw 'ThroneCore.exe was not produced' }
+          @"
+          GreyVPN Throne-base v0.1
+
+          Base: throneproj/Throne commit 583fa089f6e969a08a25fc7da2c118a2f4947849 (dev, 2026-08-28)
+          License: GPL-3.0 (same as upstream Throne)
+
+          This first build intentionally keeps the upstream executable/core layout intact.
+          Network stack, TUN, profile testing, Xray/sing-box, WireGuard, AmneziaWG and OpenVPN/OpenConnect are upstream Throne code.
+          GreyVPN-specific batch import/report/ranking changes will be layered on this verified base.
+          "@ | Set-Content -Encoding UTF8 "$dest/GREYVPN_README.txt"
+
+          Copy-Item LICENSE "$dest/LICENSE_Throne_GPL3.txt" -Force
+
+      - name: Smoke-check packaged binaries
+        shell: pwsh
+        run: |
+          $dest = 'deployment/windows-amd64'
+          $required = @('Throne.exe','ThroneCore.exe','GREYVPN_README.txt','LICENSE_Throne_GPL3.txt')
+          foreach ($name in $required) {
+            if (-not (Test-Path (Join-Path $dest $name))) { throw "Missing $name" }
+          }
+          Get-ChildItem $dest | Select-Object Name,Length | Format-Table -AutoSize
+
+      - name: Upload GreyVPN Throne-base artifact
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: GreyVPN-Throne-v0.1-win-x64
+          path: deployment/windows-amd64/**
+          if-no-files-found: error
