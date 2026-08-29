@@ -5,7 +5,7 @@ namespace GreyVPN.Services;
 public static class RealConnectionTester
 {
     public static bool Supports(VpnProfile profile) =>
-        ThroneCoreWireGuardTester.Supports(profile) ||
+        AmneziaWgRealTester.Supports(profile) ||
         OpenVpnRealTester.Supports(profile) ||
         XrayRealTester.Supports(profile) ||
         SingBoxConfigBuilder.Supports(profile);
@@ -18,11 +18,10 @@ public static class RealConnectionTester
         DiagnosticsService.Log("REAL", "Profile real-test start", profile);
         try
         {
-            // v0.8: standard WireGuard and AmneziaWG use ThroneCore's current sing-box fork.
-            // The core is started headlessly with only a loopback mixed proxy; no system TUN/routes/DNS are changed.
-            if (ThroneCoreWireGuardTester.Supports(profile))
+            // v0.9: WG/AWG use the official AmneziaWG Windows tunnel service, sequentially.
+            if (AmneziaWgRealTester.Supports(profile))
             {
-                await ThroneCoreWireGuardTester.TestAsync(profile, ct);
+                await AmneziaWgRealTester.TestAsync(profile, ct);
                 return;
             }
 
