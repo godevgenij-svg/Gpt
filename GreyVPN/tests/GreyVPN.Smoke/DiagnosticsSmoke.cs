@@ -16,6 +16,7 @@ internal static class DiagnosticsSmoke
             const string password = "SUPER_SECRET_PASSWORD_987";
             const string privateKey = "SUPER_PRIVATE_KEY_654";
             const string token = "SUPER_TOKEN_321";
+            const string sensitivePath = @"C:\Users\SensitiveUser\Downloads\private\profile.ovpn";
 
             DiagnosticsService.Initialize();
             var profile = new VpnProfile
@@ -36,7 +37,7 @@ internal static class DiagnosticsSmoke
 
             DiagnosticsService.Log("SMOKE", $"password={password} uuid={uuid} token={token} PrivateKey={privateKey}", profile);
             DiagnosticsService.WriteEngineLog(profile, "smoke-engine",
-                $"password: {password}\nUUID={uuid}\nPrivateKey = {privateKey}\nhttps://user:{password}@example.com/\nvmess://eyJwcyI6IntentionallySensitivePayload" );
+                $"password: {password}\nUUID={uuid}\nPrivateKey = {privateKey}\nhttps://user:{password}@example.com/\nvmess://eyJwcyI6IntentionallySensitivePayload\nsource={sensitivePath}" );
 
             var report = DiagnosticsService.CreateChatGptReportAsync(new[] { profile }, "smoke-test", temp)
                 .GetAwaiter().GetResult();
@@ -51,7 +52,8 @@ internal static class DiagnosticsSmoke
             MustNotContain(text, password, "password leaked into diagnostic report");
             MustNotContain(text, privateKey, "private key leaked into diagnostic report");
             MustNotContain(text, token, "token leaked into diagnostic report");
-            MustNotContain(text, @"C:\Users\SensitiveUser", "full source path leaked into diagnostic report");
+            MustNotContain(text, @"C:\Users\SensitiveUser", "Windows user path leaked into diagnostic report");
+            MustNotContain(text, sensitivePath, "full engine source path leaked into diagnostic report");
             if (!text.Contains("example.com:443", StringComparison.Ordinal))
                 throw new InvalidOperationException("Diagnostic report lost endpoint information needed for debugging.");
             if (!text.Contains("AUTH ERROR", StringComparison.Ordinal))
