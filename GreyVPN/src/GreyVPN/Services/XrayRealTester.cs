@@ -40,6 +40,7 @@ public static class XrayRealTester
         var configPath = Path.Combine(tempDir, "config.json");
         Process? process = null;
         var log = new StringBuilder();
+        var validationLog = string.Empty;
 
         try
         {
@@ -47,7 +48,10 @@ public static class XrayRealTester
             var config = XrayConfigBuilder.Build(profile, localPort);
             await File.WriteAllTextAsync(configPath, config, new UTF8Encoding(false), token);
 
+            DiagnosticsService.Log("XRAY", "Config check start", profile);
             var validation = await ValidateConfigAsync(engine, engineDir, configPath, token);
+            validationLog = validation.Log;
+            DiagnosticsService.Log("XRAY", $"Config check end. Ok={validation.Ok}; Log={validation.Log}", profile);
             if (!validation.Ok)
             {
                 profile.RealStatus = "CONFIG ERROR";
@@ -71,6 +75,7 @@ public static class XrayRealTester
             process.ErrorDataReceived += (_, e) => AppendLog(log, e.Data);
 
             if (!process.Start()) throw new InvalidOperationException("Не удалось запустить xray.exe.");
+            DiagnosticsService.Log("XRAY", $"Runtime started. PID={process.Id}", profile);
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
 
@@ -82,6 +87,7 @@ public static class XrayRealTester
                 return;
             }
 
+            DiagnosticsService.Log("XRAY", $"Local proxy ready on 127.0.0.1:{localPort}; starting HTTPS egress probe", profile);
             var sw = Stopwatch.StartNew();
             var exitIp = await ProxyEgressProbe.GetExitIpAsync(new WebProxy($"http://127.0.0.1:{localPort}"), token);
             sw.Stop();
@@ -125,6 +131,11 @@ public static class XrayRealTester
                 try { process.Kill(entireProcessTree: true); } catch { }
                 try { await process.WaitForExitAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
             }
+
+            var exitCode = process is { HasExited: true } ? process.ExitCode.ToString() : "n/a";
+            DiagnosticsService.WriteEngineLog(profile, "xray",
+                $"[CONFIG CHECK]\r\n{validationLog}\r\n\r\n[RUNTIME]\r\n{Snapshot(log)}\r\n\r\n[FINAL]\r\nStatus={profile.RealStatus}\r\nError={profile.RealError}\r\nExitIP={profile.ExitIp}\r\nRealMs={profile.RealTestMs}\r\nProcessExitCode={exitCode}\r\n");
+
             process?.Dispose();
             try { Directory.Delete(tempDir, recursive: true); } catch { }
         }
@@ -143,9 +154,22 @@ public static class XrayRealTester
             RedirectStandardError = true
         };
         using var p = Process.Start(psi) ?? throw new InvalidOperationException("Не удалось запустить проверку Xray-конфига.");
-        var stdoutTask = p.StandardOutput.ReadToEndAsync(ct);
-        var stderrTask = p.StandardError.ReadToEndAsync(ct);
-        await p.WaitForExitAsync(ct);
+        var stdoutTask = p.StandardOutput.ReadToEndAsync();
+        var stderrTask = p.StandardError.ReadToEndAsync();
+        try
+        {
+            await p.WaitForExitAsync(ct);
+        }
+        catch (OperationCanceledException)
+        {
+            if (!p.HasExited)
+            {
+                try { p.Kill(entireProcessTree: true); } catch { }
+                try { await p.WaitForExitAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
+            }
+            throw;
+        }
+
         var text = ((await stdoutTask) + Environment.NewLine + (await stderrTask)).Trim();
         return (p.ExitCode == 0, LastUsefulLines(text, "Xray: config check завершился без текста."));
     }
@@ -198,7 +222,7 @@ public static class XrayRealTester
         if (string.IsNullOrWhiteSpace(line)) return;
         lock (log)
         {
-            if (log.Length < 48_000) log.AppendLine(line);
+            if (log.Length < 96_000) log.AppendLine(line);
         }
     }
 
