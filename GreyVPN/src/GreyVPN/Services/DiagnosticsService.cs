@@ -21,8 +21,11 @@ public static class DiagnosticsService
     private static readonly Regex SecretAssignment = new(
         @"(?im)^(?<prefix>\s*(?:PrivateKey|PresharedKey|password|passwd|pass|token|secret|uuid|user_id|client_secret|api_key)\s*[:=]\s*).+$",
         RegexOptions.Compiled);
+    private static readonly Regex InlineSecretAssignment = new(
+        @"(?i)(?<prefix>\b(?:PrivateKey|PresharedKey|password|passwd|pass|token|secret|uuid|user_id|client_secret|api_key)\s*[:=]\s*)(?<value>[^\s|,;]+)",
+        RegexOptions.Compiled);
     private static readonly Regex GuidSecret = new(
-        @"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\b",
+        @"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b",
         RegexOptions.Compiled);
     private static readonly Regex UriUserInfo = new(
         @"(?i)\b(?<scheme>vless|trojan|ss|socks|http|https)://(?<userinfo>[^@\s/]+)@",
@@ -119,6 +122,7 @@ public static class DiagnosticsService
         text = PemPrivateKey.Replace(text, "[PRIVATE KEY REDACTED]");
         text = InlineSecretBlock.Replace(text, m => $"<{m.Groups["tag"].Value}>[REDACTED]</{m.Groups["tag"].Value}>");
         text = SecretAssignment.Replace(text, "${prefix}[REDACTED]");
+        text = InlineSecretAssignment.Replace(text, "${prefix}[REDACTED]");
         text = GuidSecret.Replace(text, "[UUID REDACTED]");
         text = UriUserInfo.Replace(text, "${scheme}://[CREDENTIAL REDACTED]@");
         text = VmessUri.Replace(text, "vmess://[REDACTED]");
@@ -157,7 +161,6 @@ public static class DiagnosticsService
             if (Directory.Exists(engineSource))
                 CopyDirectory(engineSource, Path.Combine(stage, "EngineLogs"));
 
-            // Defense in depth: sanitize every text artifact one more time before ZIP creation.
             foreach (var file in Directory.EnumerateFiles(stage, "*", SearchOption.AllDirectories))
             {
                 if (Path.GetExtension(file).Equals(".log", StringComparison.OrdinalIgnoreCase) ||
