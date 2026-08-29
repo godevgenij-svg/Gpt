@@ -12,12 +12,20 @@ public static class OpenVpnConfigSanitizer
         "management-query-passwords", "auth-user-pass-verify", "learn-address", "client-connect",
         "client-disconnect", "daemon", "log", "log-append", "status", "askpass",
         "route", "route-ipv6", "redirect-gateway", "redirect-private", "block-outside-dns",
-        "dhcp-option", "windows-driver", "dev-node"
+        "dhcp-option", "windows-driver", "dev-node", "writepid", "cd", "chroot"
+    };
+
+    // These directives can include additional configuration or invoke behavior outside the
+    // isolated temporary profile. Never allow them in an untrusted P2P-downloaded config.
+    private static readonly HashSet<string> RejectDirectives = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "config", "tls-crypt-v2-verify"
     };
 
     private static readonly HashSet<string> ExternalFileDirectives = new(StringComparer.OrdinalIgnoreCase)
     {
-        "ca", "cert", "key", "pkcs12", "tls-auth", "tls-crypt", "tls-crypt-v2", "auth-user-pass"
+        "ca", "cert", "key", "pkcs12", "tls-auth", "tls-crypt", "tls-crypt-v2", "auth-user-pass",
+        "secret", "crl-verify", "extra-certs", "http-proxy-user-pass"
     };
 
     private static readonly HashSet<string> AllowedInlineBlocks = new(StringComparer.OrdinalIgnoreCase)
@@ -58,6 +66,9 @@ public static class OpenVpnConfigSanitizer
         var insideBlock = false;
         string? currentBlock = null;
         var hasDev = false;
+        var hasDataCiphers = false;
+        var hasCompatMode = false;
+        string? legacyCipher = null;
 
         foreach (var rawLine in source.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
         {
@@ -65,24 +76,38 @@ public static class OpenVpnConfigSanitizer
 
             if (trimmed.StartsWith('<') && trimmed.EndsWith('>'))
             {
+                var closing = trimmed.StartsWith("</", StringComparison.Ordinal);
                 var tag = trimmed.Trim('<', '>', '/').Trim();
-                if (trimmed.StartsWith("</", StringComparison.Ordinal))
+
+                if (closing)
                 {
                     if (insideBlock && currentBlock is not null && tag.Equals(currentBlock, StringComparison.OrdinalIgnoreCase))
                     {
                         output.AppendLine(rawLine);
                         insideBlock = false;
                         currentBlock = null;
+                        continue;
                     }
-                    continue;
+
+                    error = $"OpenVPN: некорректный или неподдерживаемый inline-блок </{tag}>.";
+                    return false;
                 }
 
-                if (AllowedInlineBlocks.Contains(tag))
+                if (!AllowedInlineBlocks.Contains(tag))
                 {
-                    insideBlock = true;
-                    currentBlock = tag;
-                    output.AppendLine(rawLine);
+                    error = $"OpenVPN: неподдерживаемый inline-блок <{tag}> заблокирован.";
+                    return false;
                 }
+
+                if (insideBlock)
+                {
+                    error = "OpenVPN: вложенные inline-блоки не поддерживаются.";
+                    return false;
+                }
+
+                insideBlock = true;
+                currentBlock = tag;
+                output.AppendLine(rawLine);
                 continue;
             }
 
@@ -99,8 +124,14 @@ public static class OpenVpnConfigSanitizer
             }
 
             var parts = SplitDirective(trimmed);
-            var directive = parts.Directive;
+            var directive = NormalizeDirective(parts.Directive);
             var argument = parts.Argument;
+
+            if (RejectDirectives.Contains(directive))
+            {
+                error = $"OpenVPN: небезопасная директива '{directive}' заблокирована для real-test.";
+                return false;
+            }
 
             if (directive.Equals("dev", StringComparison.OrdinalIgnoreCase))
             {
@@ -113,6 +144,11 @@ public static class OpenVpnConfigSanitizer
                 output.AppendLine("dev tun");
                 continue;
             }
+
+            if (directive.Equals("data-ciphers", StringComparison.OrdinalIgnoreCase)) hasDataCiphers = true;
+            if (directive.Equals("compat-mode", StringComparison.OrdinalIgnoreCase)) hasCompatMode = true;
+            if (directive.Equals("cipher", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(argument))
+                legacyCipher = argument.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
 
             if (ExternalFileDirectives.Contains(directive))
             {
@@ -132,14 +168,26 @@ public static class OpenVpnConfigSanitizer
             if (RemoveDirectives.Contains(directive))
                 continue;
 
-            output.AppendLine(rawLine);
+            // Strip command-line style leading dashes after validation so --config cannot bypass checks.
+            output.Append(directive);
+            if (!string.IsNullOrWhiteSpace(argument)) output.Append(' ').Append(argument);
+            output.AppendLine();
+        }
+
+        if (insideBlock)
+        {
+            error = $"OpenVPN: inline-блок <{currentBlock}> не закрыт.";
+            return false;
         }
 
         if (!hasDev)
             output.AppendLine("dev tun");
 
-        // OpenVPN 2.6 + Wintun is used deliberately: it can create the adapter on demand
-        // when the process is elevated, without installing a persistent TAP adapter.
+        // OpenVPN 2.6 ignores --cipher for TLS data-channel negotiation. compat-mode 2.4.x
+        // makes the 2.6 client append an explicitly configured legacy cipher to data-ciphers.
+        if (!string.IsNullOrWhiteSpace(legacyCipher) && !hasDataCiphers && !hasCompatMode)
+            output.AppendLine("compat-mode 2.4.0");
+
         output.AppendLine("windows-driver wintun");
         output.AppendLine("route-nopull");
         output.AppendLine("route 1.1.1.1 255.255.255.255 vpn_gateway");
@@ -166,6 +214,8 @@ public static class OpenVpnConfigSanitizer
         }
         return result;
     }
+
+    private static string NormalizeDirective(string value) => value.Trim().TrimStart('-');
 
     private static (string Directive, string Argument) SplitDirective(string line)
     {
