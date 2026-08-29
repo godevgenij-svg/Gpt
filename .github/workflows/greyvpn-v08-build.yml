@@ -1,4 +1,4 @@
-name: GreyVPN v0.8 ThroneCore Windows build
+name: GreyVPN v0.8.1 ThroneCore Windows build
 
 on:
   push:
@@ -177,8 +177,9 @@ jobs:
           Throne.exe and ThroneCore.exe are GreyVPN IPC bridge launchers built from GreyVPN/third_party/throne-launcher/main.go using the pinned ThroneCore Go module/dependencies.
           Launch chain: GreyVPN -> ThroneCore.exe shim -> Throne.exe pipe owner/parent -> ThroneCoreUpstream.exe.
           Throne.exe owns the inner named pipe required by ThroneCore and bridges bytes to GreyVPN's outer pipe.
-          This keeps both upstream Windows parent and named-pipe-server PID checks intact without using the Throne debug build.
-          GreyVPN v0.8 uses the core headlessly for WireGuard/AmneziaWG real tests without system TUN.
+          For Start requests only, the bridge adds explicit false values for omitted proto2 need_extra_process/need_xray fields required by this pinned upstream handler; existing values are preserved.
+          This keeps both upstream Windows parent and named-pipe-server PID checks intact without using the Throne debug build or modifying the upstream binary.
+          GreyVPN v0.8.1 uses the core headlessly for WireGuard/AmneziaWG real tests without system TUN.
           "@ | Set-Content -Encoding UTF8 (Join-Path $dir 'THIRD_PARTY_ThroneCore.txt')
 
       - name: Verify packaged engines and version
@@ -199,7 +200,7 @@ jobs:
           foreach ($path in $required) { if (-not (Test-Path $path)) { throw "Missing packaged file: $path" } }
           $fv = (Get-Item .\GreyVPN\publish\GreyVPN.exe).VersionInfo.FileVersion
           Write-Host "GreyVPN FileVersion: $fv"
-          if (-not $fv.StartsWith('0.8.0')) { throw "Unexpected GreyVPN FileVersion: $fv" }
+          if (-not $fv.StartsWith('0.8.1')) { throw "Unexpected GreyVPN FileVersion: $fv" }
 
       - name: Run existing GreyVPN smoke tests
         shell: pwsh
@@ -221,6 +222,6 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: GreyVPN-v0.8-win-x64
+          name: GreyVPN-v0.8.1-win-x64
           path: GreyVPN\publish\**
           if-no-files-found: error
