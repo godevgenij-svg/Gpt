@@ -1,0 +1,58 @@
+name: MEMS Catalog Parser Windows build
+
+on:
+  push:
+    branches:
+      - mems-catalog-parser-v0.1
+    paths:
+      - 'MemsCatalogParser/**'
+      - '.github/workflows/mems-catalog-parser-build.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r .\MemsCatalogParser\requirements.txt
+
+      - name: Build Windows x64
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --windowed --onedir `
+            --name MEMS_Catalog_Parser `
+            --collect-all playwright `
+            --collect-all xlsxwriter `
+            .\MemsCatalogParser\app.py
+          Copy-Item .\MemsCatalogParser\README_RU.txt .\dist\MEMS_Catalog_Parser\README_RU.txt
+
+      - name: Self-test packaged parser
+        shell: pwsh
+        run: |
+          & .\dist\MEMS_Catalog_Parser\MEMS_Catalog_Parser.exe --self-test
+          if ($LASTEXITCODE -ne 0) { throw "Parser self-test failed: $LASTEXITCODE" }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          Compress-Archive -Path .\dist\MEMS_Catalog_Parser\* -DestinationPath .\MEMS_Catalog_Parser_v0.1_win-x64.zip -Force
+          $hash = (Get-FileHash .\MEMS_Catalog_Parser_v0.1_win-x64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "SHA256=$hash"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MEMS-Catalog-Parser-v0.1-win-x64
+          path: MEMS_Catalog_Parser_v0.1_win-x64.zip
+          if-no-files-found: error
