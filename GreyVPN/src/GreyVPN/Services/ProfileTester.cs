@@ -17,6 +17,14 @@ public static class ProfileTester
         profile.Status.Equals("TCP доступен", StringComparison.OrdinalIgnoreCase) ||
         profile.Status.Equals("Хост доступен", StringComparison.OrdinalIgnoreCase);
 
+    // A UDP service cannot be proven alive with TCP. DNS success with blocked ICMP is
+    // enough to let the protocol-specific real-test decide instead of discarding it.
+    public static bool IsRealTestCandidate(VpnProfile profile) =>
+        IsResponsive(profile) ||
+        profile.Status.Equals("UDP UNVERIFIED", StringComparison.OrdinalIgnoreCase) ||
+        (profile.Type.Equals("OpenVPN", StringComparison.OrdinalIgnoreCase) &&
+         profile.Status.Equals("NO PORT", StringComparison.OrdinalIgnoreCase));
+
     public static async Task TestAsync(VpnProfile profile, CancellationToken ct)
     {
         profile.Status = "Проверка";
@@ -69,7 +77,7 @@ public static class ProfileTester
                 else
                 {
                     profile.Status = "UDP UNVERIFIED";
-                    profile.Error = "DNS работает, но ICMP не ответил. Для UDP нужна реальная проверка протокола.";
+                    profile.Error = "DNS работает, ICMP не ответил. Профиль всё равно будет допущен к протокольному real-test.";
                 }
                 return;
             }
