@@ -5,6 +5,7 @@ namespace GreyVPN.Services;
 public static class RealConnectionTester
 {
     public static bool Supports(VpnProfile profile) =>
+        ThroneCoreWireGuardTester.Supports(profile) ||
         OpenVpnRealTester.Supports(profile) ||
         XrayRealTester.Supports(profile) ||
         SingBoxConfigBuilder.Supports(profile);
@@ -17,13 +18,20 @@ public static class RealConnectionTester
         DiagnosticsService.Log("REAL", "Profile real-test start", profile);
         try
         {
+            // v0.8: standard WireGuard and AmneziaWG use ThroneCore's current sing-box fork.
+            // The core is started headlessly with only a loopback mixed proxy; no system TUN/routes/DNS are changed.
+            if (ThroneCoreWireGuardTester.Supports(profile))
+            {
+                await ThroneCoreWireGuardTester.TestAsync(profile, ct);
+                return;
+            }
+
             if (OpenVpnRealTester.Supports(profile))
             {
                 await OpenVpnRealTester.TestAsync(profile, ct);
                 return;
             }
 
-            // VLESS / VMESS / Trojan are tested by their native Xray core.
             if (XrayRealTester.Supports(profile))
             {
                 await XrayRealTester.TestAsync(profile, ct);
