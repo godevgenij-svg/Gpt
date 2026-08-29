@@ -1,13 +1,14 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Text;
 using GreyVPN.Models;
 
 namespace GreyVPN.Services;
 
 public static class RealProxyTester
 {
-    private static readonly TimeSpan OverallTimeout = TimeSpan.FromSeconds(22);
+    private static readonly TimeSpan OverallTimeout = TimeSpan.FromSeconds(30);
 
     public static bool IsRealWorking(VpnProfile p) => p.RealStatus.Equals("РАБОТАЕТ", StringComparison.OrdinalIgnoreCase);
 
@@ -22,12 +23,9 @@ public static class RealProxyTester
         if (!SingBoxConfigBuilder.Supports(profile))
         {
             profile.RealStatus = "НЕ ПОДДЕРЖАН";
-            if (profile.Type.Equals("AmneziaWG", StringComparison.OrdinalIgnoreCase))
-                profile.RealError = "AmneziaWG не проверяется стандартным WireGuard: нужен отдельный AWG-движок, иначе результат был бы ложным.";
-            else if (profile.Type.Equals("OpenVPN", StringComparison.OrdinalIgnoreCase))
-                profile.RealError = "OpenVPN real-test не включён: стабильный sing-box 1.13.19 ещё не содержит OpenVPN client endpoint.";
-            else
-                profile.RealError = "Real v0.4: VLESS / VMESS / TROJAN / HYSTERIA2 / WireGuard / SS / SOCKS / HTTP(S).";
+            profile.RealError = profile.Type.Equals("AmneziaWG", StringComparison.OrdinalIgnoreCase)
+                ? "AmneziaWG нельзя достоверно проверить стандартным WireGuard: нужен AWG-движок."
+                : "Для этого формата real-test через sing-box не реализован.";
             return;
         }
 
@@ -42,10 +40,11 @@ public static class RealProxyTester
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(OverallTimeout);
         var token = timeout.Token;
-        var tempDir = Path.Combine(Path.GetTempPath(), "GreyVPN", Guid.NewGuid().ToString("N"));
+        var tempDir = Path.Combine(Path.GetTempPath(), "GreyVPN", "sing-box", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempDir);
         var configPath = Path.Combine(tempDir, "config.json");
         Process? process = null;
+        var log = new StringBuilder();
 
         try
         {
@@ -57,7 +56,7 @@ public static class RealProxyTester
                 return;
             }
 
-            await File.WriteAllTextAsync(configPath, config, token);
+            await File.WriteAllTextAsync(configPath, config, new UTF8Encoding(false), token);
             var check = await RunAndCaptureAsync(engine, $"check -c \"{configPath}\"", tempDir, token);
             if (check.ExitCode != 0)
             {
@@ -76,44 +75,23 @@ public static class RealProxyTester
                 RedirectStandardOutput = true,
                 RedirectStandardError = true
             };
-            process = Process.Start(psi) ?? throw new InvalidOperationException("Не удалось запустить sing-box.");
-
-            var stderrTask = process.StandardError.ReadToEndAsync(token);
-            var stdoutTask = process.StandardOutput.ReadToEndAsync(token);
+            process = new Process { StartInfo = psi, EnableRaisingEvents = true };
+            process.OutputDataReceived += (_, e) => AppendLog(log, e.Data);
+            process.ErrorDataReceived += (_, e) => AppendLog(log, e.Data);
+            if (!process.Start()) throw new InvalidOperationException("Не удалось запустить sing-box.");
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
 
             if (!await WaitForLocalPortAsync(localPort, process, token))
             {
-                var err = await SafeReadAsync(stderrTask);
-                profile.RealStatus = "ENGINE ERROR";
-                profile.RealError = string.IsNullOrWhiteSpace(err) ? "sing-box не открыл локальный proxy port." : Shorten(err);
+                profile.RealStatus = process.HasExited ? "ENGINE ERROR" : "START TIMEOUT";
+                profile.RealError = Shorten(LastUsefulLines(Snapshot(log), "sing-box не открыл локальный proxy port."));
                 return;
             }
 
             var sw = Stopwatch.StartNew();
-            using var handler = new HttpClientHandler
-            {
-                Proxy = new WebProxy($"http://127.0.0.1:{localPort}"),
-                UseProxy = true,
-                AllowAutoRedirect = false
-            };
-            using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(12) };
-
-            using var probe = await client.GetAsync("https://www.gstatic.com/generate_204", token);
-            if ((int)probe.StatusCode < 200 || (int)probe.StatusCode >= 400)
-            {
-                profile.RealStatus = "NO INTERNET";
-                profile.RealError = $"HTTPS через профиль вернул {(int)probe.StatusCode}.";
-                return;
-            }
-
-            var exitIp = (await client.GetStringAsync("https://api.ipify.org", token)).Trim();
+            var exitIp = await ProxyEgressProbe.GetExitIpAsync(new WebProxy($"http://127.0.0.1:{localPort}"), token);
             sw.Stop();
-            if (!IPAddress.TryParse(exitIp, out _))
-            {
-                profile.RealStatus = "NO INTERNET";
-                profile.RealError = "HTTPS прошёл, но внешний IP не распознан.";
-                return;
-            }
 
             profile.RealStatus = "РАБОТАЕТ";
             profile.ExitIp = exitIp;
@@ -123,7 +101,7 @@ public static class RealProxyTester
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
             profile.RealStatus = "TIMEOUT";
-            profile.RealError = $"Реальный тест превысил {OverallTimeout.TotalSeconds:0} с.";
+            profile.RealError = $"Реальный тест превысил {OverallTimeout.TotalSeconds:0} с. " + Shorten(LastUsefulLines(Snapshot(log), string.Empty));
         }
         catch (OperationCanceledException)
         {
@@ -131,19 +109,23 @@ public static class RealProxyTester
         }
         catch (HttpRequestException ex)
         {
-            profile.RealStatus = "NO INTERNET";
-            profile.RealError = Shorten(ex.Message);
+            profile.RealStatus = ClassifyRuntimeFailure(Snapshot(log));
+            var details = FlattenException(ex);
+            var engineLog = LastUsefulLines(Snapshot(log), string.Empty);
+            profile.RealError = Shorten(string.IsNullOrWhiteSpace(engineLog) ? details : $"{details} | SING-BOX: {engineLog}");
         }
         catch (Exception ex)
         {
             profile.RealStatus = "ENGINE ERROR";
-            profile.RealError = Shorten(ex.Message);
+            var engineLog = LastUsefulLines(Snapshot(log), string.Empty);
+            profile.RealError = Shorten(string.IsNullOrWhiteSpace(engineLog) ? FlattenException(ex) : $"{FlattenException(ex)} | SING-BOX: {engineLog}");
         }
         finally
         {
             if (process is { HasExited: false })
             {
                 try { process.Kill(entireProcessTree: true); } catch { }
+                try { await process.WaitForExitAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
             }
             process?.Dispose();
             try { Directory.Delete(tempDir, recursive: true); } catch { }
@@ -161,7 +143,7 @@ public static class RealProxyTester
 
     private static async Task<bool> WaitForLocalPortAsync(int port, Process process, CancellationToken ct)
     {
-        for (var i = 0; i < 40; i++)
+        for (var i = 0; i < 50; i++)
         {
             ct.ThrowIfCancellationRequested();
             if (process.HasExited) return false;
@@ -169,7 +151,7 @@ public static class RealProxyTester
             {
                 using var tcp = new TcpClient();
                 using var shortTimeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                shortTimeout.CancelAfter(150);
+                shortTimeout.CancelAfter(200);
                 await tcp.ConnectAsync(IPAddress.Loopback, port, shortTimeout.Token);
                 return true;
             }
@@ -199,10 +181,38 @@ public static class RealProxyTester
         return (process.ExitCode, await outputTask, await errorTask);
     }
 
-    private static async Task<string> SafeReadAsync(Task<string> task)
+    private static string ClassifyRuntimeFailure(string log)
     {
-        try { return await task.WaitAsync(TimeSpan.FromMilliseconds(500)); }
-        catch { return string.Empty; }
+        if (ContainsAny(log, "authentication failed", "invalid password", "bad credentials", "unauthorized")) return "AUTH ERROR";
+        if (ContainsAny(log, "tls handshake", "certificate", "x509", "reality", "server name")) return "TLS ERROR";
+        if (ContainsAny(log, "timeout", "deadline exceeded", "i/o timeout", "context deadline")) return "TIMEOUT";
+        if (ContainsAny(log, "connection refused", "connection reset", "connection closed", "network is unreachable", "no route to host")) return "CONNECT ERROR";
+        return "NO INTERNET";
+    }
+
+    private static bool ContainsAny(string value, params string[] needles) =>
+        needles.Any(x => value.Contains(x, StringComparison.OrdinalIgnoreCase));
+
+    private static void AppendLog(StringBuilder log, string? line)
+    {
+        if (string.IsNullOrWhiteSpace(line)) return;
+        lock (log)
+        {
+            if (log.Length < 48_000) log.AppendLine(line);
+        }
+    }
+
+    private static string Snapshot(StringBuilder log)
+    {
+        lock (log) return log.ToString();
+    }
+
+    private static string LastUsefulLines(string value, string fallback)
+    {
+        var lines = value.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+            .Where(x => !string.IsNullOrWhiteSpace(x)).TakeLast(10);
+        var text = string.Join(" | ", lines);
+        return string.IsNullOrWhiteSpace(text) ? fallback : text;
     }
 
     private static string TrimError(string error, string output)
@@ -211,9 +221,17 @@ public static class RealProxyTester
         return string.IsNullOrWhiteSpace(text) ? "sing-box check завершился с ошибкой." : Shorten(text);
     }
 
+    private static string FlattenException(Exception ex)
+    {
+        var parts = new List<string>();
+        for (Exception? cur = ex; cur is not null && parts.Count < 5; cur = cur.InnerException)
+            if (!string.IsNullOrWhiteSpace(cur.Message) && !parts.Contains(cur.Message)) parts.Add(cur.Message);
+        return string.Join(" -> ", parts);
+    }
+
     private static string Shorten(string value)
     {
         value = value.Replace('\r', ' ').Replace('\n', ' ').Trim();
-        return value.Length <= 500 ? value : value[..500];
+        return value.Length <= 1400 ? value : value[..1400];
     }
 }
