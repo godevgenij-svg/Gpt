@@ -28,47 +28,6 @@ jobs:
           $s = Get-Content $p -Raw -Encoding UTF8
           $s = $s.Replace('APP_VERSION = "0.1.0"', 'APP_VERSION = "0.1.1"')
           $s = $s.Replace('CARD = "div.card"', 'CARD = "div.card:has(div.font-mono):has(a[href*=\"/catalog/\"])"')
-          $old = @'
-def wait_auth_catalog(page: Page, stop: threading.Event, status: Callable[[str], None], log: Log):
-    until = time.monotonic() + 600
-    while time.monotonic() < until:
-        if stop.is_set():
-            raise RuntimeError("Остановлено пользователем")
-        try:
-            if "b2b-mems.ru" in page.url and page.locator(CARD).count() > 0:
-                return
-        except Exception:
-            pass
-        status("Если MEMS просит вход — авторизуйтесь в открытом Chrome. Продолжение автоматическое.")
-        time.sleep(1)
-    raise TimeoutError("Каталог не открылся за 10 минут")
-'@
-          $new = @'
-def wait_auth_catalog(page: Page, stop: threading.Event, status: Callable[[str], None], log: Log):
-    until = time.monotonic() + 600
-    last_catalog_open = 0.0
-    while time.monotonic() < until:
-        if stop.is_set():
-            raise RuntimeError("Остановлено пользователем")
-        try:
-            url = page.url or ""
-            if "/catalog" in url and page.locator(CARD).count() > 0:
-                log.write(f"Catalog ready after auth: {url}")
-                return
-            if "/login" not in url and time.monotonic() - last_catalog_open > 3:
-                last_catalog_open = time.monotonic()
-                try:
-                    page.goto(CATALOG_URL, wait_until="domcontentloaded", timeout=15000)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        status("Войдите в MEMS в открытом Chrome. После входа парсер сам продолжит.")
-        time.sleep(1)
-    raise TimeoutError("Не дождался авторизации и каталога за 10 минут")
-'@
-          if (-not $s.Contains($old)) { throw 'wait_auth_catalog block not found' }
-          $s = $s.Replace($old, $new)
           Set-Content $p $s -Encoding UTF8
 
       - name: Install dependencies
