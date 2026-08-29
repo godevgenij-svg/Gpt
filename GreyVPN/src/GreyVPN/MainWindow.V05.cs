@@ -17,7 +17,7 @@ public partial class MainWindow
     private async void RealTestResponsiveV05_Click(object sender, RoutedEventArgs e)
     {
         var candidates = Profiles
-            .Where(p => ProfileTester.IsResponsive(p) && RealConnectionTester.Supports(p))
+            .Where(p => ProfileTester.IsRealTestCandidate(p) && RealConnectionTester.Supports(p))
             .ToList();
         await RealTestProfilesV05Async(candidates);
     }
@@ -26,7 +26,7 @@ public partial class MainWindow
     {
         if (profiles.Count == 0)
         {
-            RefreshStatus("Нет поддерживаемых откликнувшихся профилей для real-test.");
+            RefreshStatus("Нет поддерживаемых профилей, прошедших предтест достаточно для real-test.");
             return;
         }
 
