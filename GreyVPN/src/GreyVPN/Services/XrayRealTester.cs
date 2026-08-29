@@ -45,7 +45,14 @@ public static class XrayRealTester
         try
         {
             var localPort = GetFreeTcpPort();
-            var config = XrayConfigBuilder.Build(profile, localPort);
+            var builtConfig = XrayConfigBuilder.Build(profile, localPort);
+            var normalized = XrayConfigCompat.Normalize(profile, builtConfig);
+            var config = normalized.Json;
+            if (!string.IsNullOrWhiteSpace(normalized.Warning))
+            {
+                AppendLog(log, "COMPAT: " + normalized.Warning);
+                DiagnosticsService.Log("XRAY", normalized.Warning, profile);
+            }
             await File.WriteAllTextAsync(configPath, config, new UTF8Encoding(false), token);
 
             DiagnosticsService.Log("XRAY", "Config check start", profile);
