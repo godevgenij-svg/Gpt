@@ -386,6 +386,6 @@ public static partial class ProfileImporter
     [GeneratedRegex(@"(?im)^\s*Endpoint\s*=\s*([^\r\n#;]+)")]
     private static partial Regex EndpointRegex();
 
-    [GeneratedRegex(@"(?im)^\s*(?:Jc|Jmin|Jmax|S1|S2|H1|H2|H3|H4|I1|I2|I3|I4|I5)\s*=")]
+    [GeneratedRegex(@"(?im)^\s*(?:Jc|Jmin|Jmax|S1|S2|S3|S4|H1|H2|H3|H4|I1|I2|I3|I4|I5|HeaderProtectionKey|ContentPaddingAddition|RekeyAfterTime|RekeyTimeout|RejectAfterTime|KeepaliveTimeout|MaxHandshakeAttempts|RandomTrailers|DisableCookies)\s*=")]
     private static partial Regex AwgMarkerRegex();
 }
