@@ -18,8 +18,10 @@ try
 {
     TestEndpointParser();
     await TestSubscriptionImport(temp);
+    await TestGenericImportSafety(temp);
     TestOpenVpnSanitizer(temp);
     await TestProfileStoreConcurrency();
+    await TestSynchronousStoreSave();
     await TestXrayBuilders(xray, temp);
     await TestSingBoxBuilders(singBox, temp);
     Console.WriteLine("ALL GREYVPN SMOKE TESTS PASSED");
@@ -56,6 +58,29 @@ static async Task TestSubscriptionImport(string temp)
     Console.WriteLine("OK subscription importer");
 }
 
+static async Task TestGenericImportSafety(string temp)
+{
+    var vpn = Path.Combine(temp, "sensitive.vpn");
+    var conf = Path.Combine(temp, "not-wireguard.conf");
+    var huge = Path.Combine(temp, "too-large.txt");
+    await File.WriteAllTextAsync(vpn, "server=127.0.0.1\nrootPassword=DO_NOT_COPY_THIS_SECRET\n");
+    await File.WriteAllTextAsync(conf, "ordinary_setting=true\n");
+    await using (var fs = new FileStream(huge, FileMode.Create, FileAccess.Write, FileShare.None))
+        fs.SetLength(16L * 1024 * 1024 + 1);
+
+    var profiles = await ProfileImporter.ImportFilesAsync(new[] { vpn, conf, huge });
+    var vpnProfile = profiles.Single(p => p.SourcePath == vpn);
+    var confProfile = profiles.Single(p => p.SourcePath == conf);
+    var hugeProfile = profiles.Single(p => p.SourcePath == huge);
+
+    Must(vpnProfile.Type == "Amnezia backup/config" && string.IsNullOrEmpty(vpnProfile.RawValue),
+        "generic .vpn secrets are not copied into persistent RawValue");
+    Must(confProfile.Type == "CONF", "unrelated .conf is not mislabeled as WireGuard");
+    Must(hugeProfile.Type == "Ошибка импорта" && hugeProfile.Error.Contains("слишком большой", StringComparison.OrdinalIgnoreCase),
+        "oversized config is rejected before full read");
+    Console.WriteLine("OK generic import safety");
+}
+
 static void TestOpenVpnSanitizer(string temp)
 {
     var safePath = Path.Combine(temp, "legacy.ovpn");
@@ -87,7 +112,30 @@ static async Task TestProfileStoreConcurrency()
     await Task.WhenAll(saves);
     var loaded = await ProfileStore.LoadAsync();
     Must(loaded.Count == 1 && loaded[0].Name.StartsWith("smoke-", StringComparison.Ordinal), "atomic concurrent profile store");
-    Console.WriteLine("OK profile store");
+    Console.WriteLine("OK profile store concurrency");
+}
+
+static async Task TestSynchronousStoreSave()
+{
+    var blockedContextSave = Task.Run(() =>
+    {
+        var previous = SynchronizationContext.Current;
+        SynchronizationContext.SetSynchronizationContext(new BlackHoleSynchronizationContext());
+        try
+        {
+            ProfileStore.SaveAsync(new[]
+            {
+                new VpnProfile { Name = "sync-close", Type = "VLESS", Endpoint = "example.com:443" }
+            }).GetAwaiter().GetResult();
+        }
+        finally
+        {
+            SynchronizationContext.SetSynchronizationContext(previous);
+        }
+    });
+
+    await blockedContextSave.WaitAsync(TimeSpan.FromSeconds(5));
+    Console.WriteLine("OK synchronous shutdown save");
 }
 
 static async Task TestXrayBuilders(string xray, string temp)
@@ -179,4 +227,13 @@ static async Task<(int ExitCode, string Text)> Run(string file, string arguments
 static void Must(bool condition, string message)
 {
     if (!condition) throw new InvalidOperationException("SMOKE FAILED: " + message);
+}
+
+sealed class BlackHoleSynchronizationContext : SynchronizationContext
+{
+    public override void Post(SendOrPostCallback d, object? state)
+    {
+        // Deliberately never execute posted continuations. SaveAsync must use ConfigureAwait(false)
+        // internally so MainWindow_Closing can synchronously wait without a WPF UI deadlock.
+    }
 }
