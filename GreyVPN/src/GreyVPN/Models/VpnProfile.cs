@@ -28,6 +28,7 @@ public sealed class VpnProfile : INotifyPropertyChanged
     public string Endpoint { get => _endpoint; set => Set(ref _endpoint, value); }
     public string Transport { get => _transport; set => Set(ref _transport, value); }
     public string SourcePath { get; set; } = string.Empty;
+    public string StoredConfigFile { get; set; } = string.Empty;
     public string RawValue { get; set; } = string.Empty;
     public string Status { get => _status; set => Set(ref _status, value); }
 
