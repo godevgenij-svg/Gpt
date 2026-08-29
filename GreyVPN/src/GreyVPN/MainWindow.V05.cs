@@ -35,30 +35,56 @@ public partial class MainWindow
         var ct = _testCts.Token;
         var completed = 0;
         var outcome = "completed";
-        using var gate = new SemaphoreSlim(RealTestConcurrency);
 
-        DiagnosticsService.Log("REAL", $"Real-test started. Profiles={profiles.Count}; Concurrency={RealTestConcurrency}");
+        // Proxy engines do not alter the Windows routing table. Test them first in parallel.
+        // WG/AWG/OpenVPN install a real Windows tunnel/adapter and therefore must run strictly
+        // alone; otherwise one profile can hijack another profile's HTTPS probe.
+        var proxyProfiles = profiles.Where(p => !IsSystemTunnelProfile(p)).ToList();
+        var tunnelProfiles = profiles.Where(IsSystemTunnelProfile).ToList();
+
+        DiagnosticsService.Log("REAL", $"Real-test started. Profiles={profiles.Count}; Proxy={proxyProfiles.Count}; SystemTunnel={tunnelProfiles.Count}; ProxyConcurrency={RealTestConcurrency}; TunnelConcurrency=1");
 
         try
         {
-            RefreshStatus($"Real-test 0/{profiles.Count}. Параллельно: {RealTestConcurrency}; OpenVPN выполняется по одному.");
-            var tasks = profiles.Select(async profile =>
+            RefreshStatus($"Real-test 0/{profiles.Count}. Сначала proxy: {proxyProfiles.Count}, затем системные туннели: {tunnelProfiles.Count} по одному.");
+
+            using (var proxyGate = new SemaphoreSlim(RealTestConcurrency))
             {
-                await gate.WaitAsync(ct);
+                var tasks = proxyProfiles.Select(async profile =>
+                {
+                    await proxyGate.WaitAsync(ct);
+                    try
+                    {
+                        await RealConnectionTester.TestAsync(profile, ct);
+                    }
+                    finally
+                    {
+                        proxyGate.Release();
+                        var done = Interlocked.Increment(ref completed);
+                        await Dispatcher.InvokeAsync(() =>
+                            RefreshStatus($"Real-test {done}/{profiles.Count}. Proxy-фаза. Работают: {profiles.Count(RealConnectionTester.IsRealWorking)}"));
+                    }
+                }).ToArray();
+
+                await Task.WhenAll(tasks);
+            }
+
+            foreach (var profile in tunnelProfiles)
+            {
+                ct.ThrowIfCancellationRequested();
+                RefreshStatus($"Real-test {completed}/{profiles.Count}. Системный туннель: {profile.Type} / {profile.Name}");
                 try
                 {
                     await RealConnectionTester.TestAsync(profile, ct);
                 }
                 finally
                 {
-                    gate.Release();
-                    var done = Interlocked.Increment(ref completed);
+                    completed++;
                     await Dispatcher.InvokeAsync(() =>
-                        RefreshStatus($"Real-test {done}/{profiles.Count}. Работают: {profiles.Count(RealConnectionTester.IsRealWorking)}"));
+                        RefreshStatus($"Real-test {completed}/{profiles.Count}. Туннели по одному. Работают: {profiles.Count(RealConnectionTester.IsRealWorking)}"));
                 }
-            }).ToArray();
+            }
 
-            await Task.WhenAll(tasks);
             DiagnosticsService.Log("REAL", $"Real-test completed. Profiles={profiles.Count}; Working={profiles.Count(RealConnectionTester.IsRealWorking)}");
             RefreshStatus($"Real-test завершён: {profiles.Count}. Работают: {profiles.Count(RealConnectionTester.IsRealWorking)}");
         }
@@ -92,4 +118,9 @@ public partial class MainWindow
             }
         }
     }
+
+    private static bool IsSystemTunnelProfile(VpnProfile profile) =>
+        profile.Type.Equals("WireGuard", StringComparison.OrdinalIgnoreCase) ||
+        profile.Type.Equals("AmneziaWG", StringComparison.OrdinalIgnoreCase) ||
+        profile.Type.Equals("OpenVPN", StringComparison.OrdinalIgnoreCase);
 }
