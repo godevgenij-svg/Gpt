@@ -23,20 +23,9 @@ public static class AmneziaWgTestConfigBuilder
                 continue;
             }
 
-            var eq = trimmed.IndexOf('=');
-            var key = eq > 0 ? trimmed[..eq].Trim() : string.Empty;
-
-            if (section.Equals("Interface", StringComparison.OrdinalIgnoreCase) &&
-                key.Equals("DNS", StringComparison.OrdinalIgnoreCase))
-            {
-                // The checker probes numeric IPs and must not replace the user's system DNS.
-                continue;
-            }
-
-            // v0.9.1 intentionally preserves the profile's original AllowedIPs. Rewriting them
-            // to two /32 routes caused WSAEHOSTUNREACH on Windows even while the official
-            // AmneziaWG tunnel service was RUNNING. The real checker must exercise the same
-            // routing semantics the profile would use in the official client.
+            // The real-test must exercise the same tunnel semantics as the official client.
+            // In particular, keep DNS and AllowedIPs unchanged: WireGuard/AmneziaWG on Windows
+            // may install full-tunnel routing/firewall rules based on those fields.
             output.Add(raw);
         }
 
