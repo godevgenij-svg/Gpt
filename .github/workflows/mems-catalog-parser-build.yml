@@ -1,9 +1,9 @@
-name: MEMS Catalog Parser Windows build
+name: MEMS Catalog Parser v0.2 Windows build
 
 on:
   push:
     branches:
-      - mems-catalog-parser-v0.1
+      - mems-catalog-parser-v0.2-savealways
     paths:
       - 'MemsCatalogParser/**'
       - '.github/workflows/mems-catalog-parser-build.yml'
@@ -20,15 +20,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
-      - name: Apply minimal auth fix
-        shell: pwsh
-        run: |
-          $p = '.\MemsCatalogParser\parser_core.py'
-          $s = Get-Content $p -Raw -Encoding UTF8
-          $s = $s.Replace('APP_VERSION = "0.1.0"', 'APP_VERSION = "0.1.1"')
-          $s = $s.Replace('CARD = "div.card"', 'CARD = "div.card:has(div.font-mono):has(a[href*=\"/catalog/\"])"')
-          Set-Content $p $s -Encoding UTF8
 
       - name: Install dependencies
         shell: pwsh
@@ -57,13 +48,13 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          Compress-Archive -Path .\dist\MEMS_Catalog_Parser\* -DestinationPath .\MEMS_Catalog_Parser_v0.1.1_win-x64.zip -Force
-          $hash = (Get-FileHash .\MEMS_Catalog_Parser_v0.1.1_win-x64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          Compress-Archive -Path .\dist\MEMS_Catalog_Parser\* -DestinationPath .\MEMS_Catalog_Parser_v0.2_win-x64.zip -Force
+          $hash = (Get-FileHash .\MEMS_Catalog_Parser_v0.2_win-x64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
           Write-Host "SHA256=$hash"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MEMS-Catalog-Parser-v0.1.1-win-x64
-          path: MEMS_Catalog_Parser_v0.1.1_win-x64.zip
+          name: MEMS-Catalog-Parser-v0.2-win-x64
+          path: MEMS_Catalog_Parser_v0.2_win-x64.zip
           if-no-files-found: error
