@@ -18,14 +18,8 @@ public static class OpenVpnRealTester
     public static async Task TestAsync(VpnProfile profile, CancellationToken ct)
     {
         await OpenVpnGate.WaitAsync(ct);
-        try
-        {
-            await TestCoreAsync(profile, ct);
-        }
-        finally
-        {
-            OpenVpnGate.Release();
-        }
+        try { await TestCoreAsync(profile, ct); }
+        finally { OpenVpnGate.Release(); }
     }
 
     private static async Task TestCoreAsync(VpnProfile profile, CancellationToken ct)
@@ -54,22 +48,17 @@ public static class OpenVpnRealTester
 
         if (!OpenVpnConfigSanitizer.TryBuildSafeConfig(profile, out var safeConfig, out var sanitizeError))
         {
-            profile.RealStatus = sanitizeError.Contains("логин/пароль", StringComparison.OrdinalIgnoreCase)
-                ? "AUTH NEEDED"
-                : "CONFIG BLOCKED";
+            profile.RealStatus = sanitizeError.Contains("логин/пароль", StringComparison.OrdinalIgnoreCase) ? "AUTH NEEDED" : "CONFIG BLOCKED";
             profile.RealError = sanitizeError;
             return;
         }
 
         string baselineIp;
-        try
-        {
-            baselineIp = await GetCloudflareIpAsync(ct);
-        }
+        try { baselineIp = await GetCloudflareIpAsync(ct); }
         catch (Exception ex)
         {
             profile.RealStatus = "BASELINE ERROR";
-            profile.RealError = $"Не удалось получить исходный внешний IP: {Shorten(ex.Message)}";
+            profile.RealError = $"Не удалось получить исходный внешний IP: {Shorten(FlattenException(ex))}";
             return;
         }
 
@@ -86,7 +75,6 @@ public static class OpenVpnRealTester
         try
         {
             await File.WriteAllTextAsync(configPath, safeConfig, new UTF8Encoding(false), token);
-
             var psi = new ProcessStartInfo
             {
                 FileName = engine,
@@ -102,9 +90,7 @@ public static class OpenVpnRealTester
             process.OutputDataReceived += (_, e) => HandleLine(e.Data, log, connected);
             process.ErrorDataReceived += (_, e) => HandleLine(e.Data, log, connected);
 
-            if (!process.Start())
-                throw new InvalidOperationException("Не удалось запустить openvpn.exe.");
-
+            if (!process.Start()) throw new InvalidOperationException("Не удалось запустить openvpn.exe.");
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
 
@@ -115,8 +101,7 @@ public static class OpenVpnRealTester
 
             if (winner != connected.Task || !connected.Task.IsCompletedSuccessfully)
             {
-                var text = Snapshot(log);
-                ClassifyFailure(profile, text, process.HasExited ? process.ExitCode : null);
+                ClassifyFailure(profile, Snapshot(log), process.HasExited ? process.ExitCode : null);
                 return;
             }
 
@@ -146,21 +131,19 @@ public static class OpenVpnRealTester
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
             profile.RealStatus = "TIMEOUT";
-            profile.RealError = "OpenVPN real-test превысил таймаут.";
+            profile.RealError = "OpenVPN real-test превысил таймаут. " + Shorten(LastUsefulLines(Snapshot(log)));
         }
-        catch (OperationCanceledException)
-        {
-            profile.RealStatus = "ОТМЕНЕНО";
-        }
+        catch (OperationCanceledException) { profile.RealStatus = "ОТМЕНЕНО"; }
         catch (HttpRequestException ex)
         {
             profile.RealStatus = "NO INTERNET";
-            profile.RealError = Shorten(ex.Message);
+            var tail = LastUsefulLines(Snapshot(log));
+            profile.RealError = Shorten($"{FlattenException(ex)} | OPENVPN: {tail}");
         }
         catch (Exception ex)
         {
             profile.RealStatus = "ENGINE ERROR";
-            profile.RealError = Shorten(ex.Message);
+            profile.RealError = Shorten($"{FlattenException(ex)} | OPENVPN: {LastUsefulLines(Snapshot(log))}");
         }
         finally
         {
@@ -177,12 +160,8 @@ public static class OpenVpnRealTester
     private static void HandleLine(string? line, StringBuilder log, TaskCompletionSource connected)
     {
         if (string.IsNullOrWhiteSpace(line)) return;
-        lock (log)
-        {
-            if (log.Length < 24_000) log.AppendLine(line);
-        }
-        if (line.Contains("Initialization Sequence Completed", StringComparison.OrdinalIgnoreCase))
-            connected.TrySetResult();
+        lock (log) { if (log.Length < 32_000) log.AppendLine(line); }
+        if (line.Contains("Initialization Sequence Completed", StringComparison.OrdinalIgnoreCase)) connected.TrySetResult();
     }
 
     private static async Task<string> GetCloudflareIpAsync(CancellationToken ct)
@@ -191,10 +170,7 @@ public static class OpenVpnRealTester
         using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(8) };
         var text = await client.GetStringAsync(ProbeUrl, ct);
         foreach (var line in text.Split('\n'))
-        {
-            if (line.StartsWith("ip=", StringComparison.OrdinalIgnoreCase))
-                return line[3..].Trim();
-        }
+            if (line.StartsWith("ip=", StringComparison.OrdinalIgnoreCase)) return line[3..].Trim();
         throw new InvalidDataException("Cloudflare trace не вернул поле ip.");
     }
 
@@ -206,17 +182,27 @@ public static class OpenVpnRealTester
             profile.RealStatus = "AUTH ERROR";
             profile.RealError = "OpenVPN: AUTH_FAILED." + suffix;
         }
-        else if (log.Contains("There are no TAP-Windows adapters", StringComparison.OrdinalIgnoreCase) ||
-                 log.Contains("wintun", StringComparison.OrdinalIgnoreCase) &&
-                 (log.Contains("failed", StringComparison.OrdinalIgnoreCase) || log.Contains("error", StringComparison.OrdinalIgnoreCase)))
+        // TLS must be checked before driver errors. OpenVPN logs often mention Wintun
+        // during normal startup, which made v0.5 misclassify TLS failures as DRIVER ERROR.
+        else if (ContainsAny(log, "TLS Error", "TLS key negotiation failed", "TLS handshake failed", "VERIFY ERROR"))
+        {
+            profile.RealStatus = "TLS ERROR";
+            profile.RealError = Shorten(LastUsefulLines(log)) + suffix;
+        }
+        else if (ContainsAny(log,
+                     "There are no TAP-Windows adapters",
+                     "Failed to create Wintun adapter",
+                     "Cannot create Wintun adapter",
+                     "Failed to open Wintun",
+                     "wintun.dll not found",
+                     "CreateAdapter failed"))
         {
             profile.RealStatus = "DRIVER ERROR";
             profile.RealError = Shorten(LastUsefulLines(log)) + suffix;
         }
-        else if (log.Contains("TLS Error", StringComparison.OrdinalIgnoreCase) ||
-                 log.Contains("TLS key negotiation failed", StringComparison.OrdinalIgnoreCase))
+        else if (ContainsAny(log, "Connection refused", "Connection reset", "Network is unreachable", "No route to host"))
         {
-            profile.RealStatus = "TLS ERROR";
+            profile.RealStatus = "CONNECT ERROR";
             profile.RealError = Shorten(LastUsefulLines(log)) + suffix;
         }
         else
@@ -226,19 +212,18 @@ public static class OpenVpnRealTester
         }
     }
 
+    private static bool ContainsAny(string value, params string[] needles) =>
+        needles.Any(x => value.Contains(x, StringComparison.OrdinalIgnoreCase));
+
     private static string LastUsefulLines(string value)
     {
         var lines = value.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
-            .Where(x => !string.IsNullOrWhiteSpace(x))
-            .TakeLast(6);
+            .Where(x => !string.IsNullOrWhiteSpace(x)).TakeLast(8);
         var text = string.Join(" | ", lines);
         return string.IsNullOrWhiteSpace(text) ? "OpenVPN не завершил подключение." : text;
     }
 
-    private static string Snapshot(StringBuilder log)
-    {
-        lock (log) return log.ToString();
-    }
+    private static string Snapshot(StringBuilder log) { lock (log) return log.ToString(); }
 
     private static bool IsAdministrator()
     {
@@ -247,15 +232,20 @@ public static class OpenVpnRealTester
             using var identity = WindowsIdentity.GetCurrent();
             return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
         }
-        catch
-        {
-            return false;
-        }
+        catch { return false; }
+    }
+
+    private static string FlattenException(Exception ex)
+    {
+        var parts = new List<string>();
+        for (Exception? cur = ex; cur is not null && parts.Count < 5; cur = cur.InnerException)
+            if (!string.IsNullOrWhiteSpace(cur.Message) && !parts.Contains(cur.Message)) parts.Add(cur.Message);
+        return string.Join(" -> ", parts);
     }
 
     private static string Shorten(string value)
     {
         value = value.Replace('\r', ' ').Replace('\n', ' ').Trim();
-        return value.Length <= 700 ? value : value[..700];
+        return value.Length <= 1100 ? value : value[..1100];
     }
 }
