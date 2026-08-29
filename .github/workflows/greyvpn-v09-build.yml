@@ -1,4 +1,4 @@
-name: GreyVPN v0.9 Official Engines Windows build
+name: GreyVPN v0.9.1 Official Engines Windows build
 
 on:
   push:
@@ -129,7 +129,7 @@ jobs:
           Pinned commit: 800416d673d83ed90ede02ca2ccd3683fe107d12
           Backend modules: github.com/amnezia-vpn/amneziawg-windows/v3 v3.1.20260814 and amneziawg-go/v3 v3.1.20260814
           License: MIT
-          GreyVPN uses /installtunnelservice and /uninstalltunnelservice with a temporary config that routes only 1.1.1.1/32 and 1.0.0.1/32 during real-test.
+          GreyVPN v0.9.1 launches one temporary official tunnel service at a time, preserves the profile's original AllowedIPs, and verifies latest-handshake/transfer with awg.exe before deciding the result.
           "@ | Set-Content -Encoding UTF8 (Join-Path $dst 'THIRD_PARTY_AmneziaWG.txt')
           & (Join-Path $dst 'awg.exe') --version
           if ($LASTEXITCODE -ne 0) { throw "awg.exe --version failed: $LASTEXITCODE" }
@@ -150,10 +150,10 @@ jobs:
             '.\GreyVPN\publish\engines\amneziawg\LICENSE_AmneziaWG_MIT.txt'
           )
           foreach ($path in $required) { if (-not (Test-Path $path)) { throw "Missing packaged file: $path" } }
-          if (Test-Path '.\GreyVPN\publish\engines\throne') { throw 'ThroneCore must not be packaged in GreyVPN v0.9' }
+          if (Test-Path '.\GreyVPN\publish\engines\throne') { throw 'ThroneCore must not be packaged in GreyVPN v0.9.1' }
           $fv = (Get-Item .\GreyVPN\publish\GreyVPN.exe).VersionInfo.FileVersion
           Write-Host "GreyVPN FileVersion: $fv"
-          if (-not $fv.StartsWith('0.9.0')) { throw "Unexpected GreyVPN FileVersion: $fv" }
+          if (-not $fv.StartsWith('0.9.1')) { throw "Unexpected GreyVPN FileVersion: $fv" }
 
       - name: Run GreyVPN smoke tests
         shell: pwsh
@@ -164,11 +164,12 @@ jobs:
             .\GreyVPN\publish\engines\sing-box.exe
           if ($LASTEXITCODE -ne 0) { throw "GreyVPN smoke tests failed: $LASTEXITCODE" }
 
-      - name: Run official AmneziaWG Windows service lifecycle smoke
+      - name: Run official AmneziaWG Windows service and telemetry smoke
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $exe = (Resolve-Path '.\GreyVPN\publish\engines\amneziawg\amneziawg.exe').Path
+          $awg = (Resolve-Path '.\GreyVPN\publish\engines\amneziawg\awg.exe').Path
           $dir = Join-Path $env:RUNNER_TEMP 'GreyVPN-AmneziaWG-smoke'
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           $conf = Join-Path $dir 'GreyVPNSmoke.conf'
@@ -228,6 +229,13 @@ jobs:
               throw "AmneziaWG service status is $($svc.Status), expected Running"
             }
             Write-Host "Official AmneziaWG tunnel service lifecycle: RUNNING"
+
+            $hs = & $awg show GreyVPNSmoke latest-handshakes 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "awg latest-handshakes failed: $hs" }
+            Write-Host "awg latest-handshakes: $hs"
+            $transfer = & $awg show GreyVPNSmoke transfer 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "awg transfer failed: $transfer" }
+            Write-Host "awg transfer: $transfer"
           }
           finally {
             $svc = Get-Service -Name 'AmneziaWGTunnel$GreyVPNSmoke' -ErrorAction SilentlyContinue
@@ -243,6 +251,6 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: GreyVPN-v0.9-win-x64
+          name: GreyVPN-v0.9.1-win-x64
           path: GreyVPN\publish\**
           if-no-files-found: error
