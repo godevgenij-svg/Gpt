@@ -15,8 +15,9 @@ public static class AmneziaWgRealTester
     private static readonly SemaphoreSlim Gate = new(1, 1);
     private static readonly Uri[] ProbeUris =
     {
-        new("https://1.1.1.1/cdn-cgi/trace"),
-        new("https://1.0.0.1/cdn-cgi/trace")
+        new("https://www.cloudflare.com/cdn-cgi/trace"),
+        new("https://cloudflare.com/cdn-cgi/trace"),
+        new("https://1.1.1.1/cdn-cgi/trace")
     };
 
     public static bool Supports(VpnProfile profile) => ConfigVault.Supports(profile);
@@ -352,7 +353,7 @@ public static class AmneziaWgRealTester
                     Version = HttpVersion.Version11,
                     VersionPolicy = HttpVersionPolicy.RequestVersionOrLower
                 };
-                request.Headers.UserAgent.ParseAdd("GreyVPN/0.9.1-real-test");
+                request.Headers.UserAgent.ParseAdd("GreyVPN/0.9.1.3-real-test");
                 using var response = await client.SendAsync(request, HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false);
                 var text = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
                 if (!response.IsSuccessStatusCode)
