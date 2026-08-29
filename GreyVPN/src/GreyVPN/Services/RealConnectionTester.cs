@@ -5,7 +5,9 @@ namespace GreyVPN.Services;
 public static class RealConnectionTester
 {
     public static bool Supports(VpnProfile profile) =>
-        OpenVpnRealTester.Supports(profile) || SingBoxConfigBuilder.Supports(profile);
+        OpenVpnRealTester.Supports(profile) ||
+        XrayRealTester.Supports(profile) ||
+        SingBoxConfigBuilder.Supports(profile);
 
     public static bool IsRealWorking(VpnProfile profile) =>
         profile.RealStatus.Equals("РАБОТАЕТ", StringComparison.OrdinalIgnoreCase);
@@ -14,6 +16,11 @@ public static class RealConnectionTester
     {
         if (OpenVpnRealTester.Supports(profile))
             return OpenVpnRealTester.TestAsync(profile, ct);
+
+        // VLESS / VMESS / Trojan are tested by their native Xray core.
+        // This also gives us XHTTP support which stable sing-box does not provide yet.
+        if (XrayRealTester.Supports(profile))
+            return XrayRealTester.TestAsync(profile, ct);
 
         if (SingBoxConfigBuilder.Supports(profile))
             return RealProxyTester.TestAsync(profile, ct);
