@@ -46,7 +46,21 @@ public static class OpenVpnRealTester
             return;
         }
 
-        if (!OpenVpnConfigSanitizer.TryBuildSafeConfig(profile, out var safeConfig, out var sanitizeError))
+        var usableSourcePath = await OpenVpnConfigVault.ResolveUsablePathAsync(profile, ct).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(usableSourcePath))
+        {
+            profile.RealStatus = "CONFIG BLOCKED";
+            profile.RealError = "Исходный .ovpn не найден и ещё не сохранён во внутреннее хранилище GreyVPN. Импортируй этот профиль один раз заново.";
+            DiagnosticsService.Log("OPENVPN", "No source or vaulted .ovpn available.", profile);
+            return;
+        }
+
+        var sanitizerProfile = new VpnProfile
+        {
+            Type = "OpenVPN",
+            SourcePath = usableSourcePath
+        };
+        if (!OpenVpnConfigSanitizer.TryBuildSafeConfig(sanitizerProfile, out var safeConfig, out var sanitizeError))
         {
             profile.RealStatus = sanitizeError.Contains("логин/пароль", StringComparison.OrdinalIgnoreCase) ? "AUTH NEEDED" : "CONFIG BLOCKED";
             profile.RealError = sanitizeError;
