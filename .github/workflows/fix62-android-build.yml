@@ -1,0 +1,41 @@
+name: FIX62 Android APK
+
+on:
+  push:
+    branches: [ fix62-android-build ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore Android project
+        run: |
+          cat fix62-build/srcxz.part* | tr -d '\n\r' | base64 -d > fix62_android_src.tar.xz
+          tar -xJf fix62_android_src.tar.xz
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK
+        run: sdkmanager "platforms;android-36" "build-tools;35.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Build APK
+        working-directory: fix62_android
+        run: gradle assembleDebug --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: FIX62-Diagnostics-APK
+          path: fix62_android/app/build/outputs/apk/debug/app-debug.apk
