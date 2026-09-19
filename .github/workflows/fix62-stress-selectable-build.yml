@@ -1,0 +1,48 @@
+name: Temporary FIX62 Stress Selectable APK builder
+
+on:
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-stress-selectable:
+    if: github.head_ref == 'fix62-stress-build'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore Android project
+        run: |
+          cat fix62-stress/selectable.part* | tr -d '\n\r' | base64 -d > fix62_stress_selectable.tar.xz
+          tar -xJf fix62_stress_selectable.tar.xz
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: ''
+
+      - name: Install Android SDK packages
+        run: sdkmanager "platforms;android-36" "build-tools;35.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Build APK
+        working-directory: fix62_stress
+        run: gradle assembleDebug --stacktrace
+
+      - name: Verify APK
+        run: |
+          test -f fix62_stress/app/build/outputs/apk/debug/app-debug.apk
+          unzip -t fix62_stress/app/build/outputs/apk/debug/app-debug.apk >/dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FIX62-Stress-Selectable-APK
+          path: fix62_stress/app/build/outputs/apk/debug/app-debug.apk
