@@ -1,0 +1,1 @@
+Retry after switching to the Android SDK preinstalled on GitHub runner.
