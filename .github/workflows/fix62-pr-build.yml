@@ -15,6 +15,7 @@ jobs:
         run: |
           cat fix62-build/srcxz.part* | tr -d '\n\r' | base64 -d > fix62_android_src.tar.xz
           tar -xJf fix62_android_src.tar.xz
+          sed -i 's/onScanResult(int type,ScanResult r)/onScanResult(int type,android.bluetooth.le.ScanResult r)/' fix62_android/app/src/main/java/ru/fix62/diagnostics/ConnectivityTestActivity.java
 
       - uses: actions/setup-java@v5
         with:
