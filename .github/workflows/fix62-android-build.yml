@@ -3,6 +3,8 @@ name: FIX62 Android APK
 on:
   push:
     branches: [ fix62-android-build ]
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
