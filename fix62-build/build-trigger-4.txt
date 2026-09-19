@@ -1,0 +1,1 @@
+Retry with setup-android v4 and no obsolete tools package.
