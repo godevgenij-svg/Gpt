@@ -13,7 +13,10 @@ jobs:
 
       - name: Restore Android project
         run: |
+          sha256sum fix62-stress-max/source.part*
+          wc -c fix62-stress-max/source.part*
           cat fix62-stress-max/source.part* | tr -d '\n\r' | base64 -d > fix62_stress_max.tar.xz
+          sha256sum fix62_stress_max.tar.xz
           tar -xJf fix62_stress_max.tar.xz
 
       - uses: actions/setup-java@v5
